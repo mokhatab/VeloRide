@@ -3,6 +3,7 @@ package com.example.data.repository
 import com.example.base.FirestoreEmulatorTestBase
 import com.example.data.firestore.DispatchRepository
 import com.example.data.firestore.DriverRepository
+import com.example.data.firestore.FcmTokenRepository
 import com.example.data.firestore.PricingAndAdminRepository
 import com.example.data.firestore.UserRepository
 import com.example.domain.mapping.GeoPoint
@@ -27,6 +28,10 @@ import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -186,10 +191,21 @@ class VeloRideRepositoryRuleTest : FirestoreEmulatorTestBase() {
         )
         val ride = DispatchRepository(firestore, auth).requestRide("Test Rider", quote, null).getOrThrow()
 
-        // Without backend URL & Stripe key, payment gateway MUST return FAILED honestly
+        // Without backend URL & Stripe key, digital CARD payment MUST return FAILED honestly
         val paymentResult = withTimeout(TIMEOUT_MS) { repo.initiateRidePayment(ride, null, "CARD") }
         assertTrue(paymentResult.isSuccess)
         assertEquals("FAILED", paymentResult.getOrThrow().status)
+
+        // CASH settlement mode creates a clean PENDING cash-handoff record without calling Stripe
+        val cashQuote = PricingEngine.calculateQuote(
+            policy,
+            FareCalculationInput("r1", "Tahrir", 30.0444, 31.2357, "Airport", 30.1128, 31.3999, 18.0, 26L)
+        )
+        val cashRide = DispatchRepository(firestore, auth).requestRide("Cash Rider", cashQuote, "CASH").getOrThrow()
+        val cashPaymentResult = withTimeout(TIMEOUT_MS) { repo.initiateRidePayment(cashRide, "CASH", "CASH") }
+        assertTrue(cashPaymentResult.isSuccess)
+        assertEquals("CASH", cashPaymentResult.getOrThrow().paymentMethodType)
+        assertEquals("PENDING", cashPaymentResult.getOrThrow().status)
     }
 
     @Test
@@ -219,6 +235,217 @@ class VeloRideRepositoryRuleTest : FirestoreEmulatorTestBase() {
             dispatchRepo.cancelRide(ride, "RIDER", "Test cancel", 0L)
         }
         assertTrue(cancelRes.isSuccess)
+    }
+
+    @Test
+    fun tripHistory_riderRetrievesPastRidesAndUnauthenticatedDriverHistoryDenied() = runBlocking {
+        val riderEmail = "hist_rider_${UUID.randomUUID().toString().take(8)}@test.com"
+        val riderUid = signInTestUser(riderEmail)
+        val dispatchRepo = DispatchRepository(firestore, auth)
+        val policy = MarketCatalog.defaultPoliciesForAllMarkets().first { it.city == "Cairo" && !it.isTaxiReference }
+
+        // Create an active ride and a cancelled (past) ride
+        val activeQuote = PricingEngine.calculateQuote(
+            policy,
+            FareCalculationInput(riderUid, "Zamalek", 30.0609, 31.2197, "Maadi", 29.9602, 31.2569, 14.0, 22L)
+        )
+        val activeRide = withTimeout(TIMEOUT_MS) {
+            dispatchRepo.requestRide("History Rider", activeQuote, "E_WALLET:pm_1").getOrThrow()
+        }
+
+        val pastQuote = PricingEngine.calculateQuote(
+            policy,
+            FareCalculationInput(riderUid, "Tahrir Square", 30.0444, 31.2357, "Cairo Airport", 30.1128, 31.3999, 19.0, 28L)
+        )
+        val pastRide = withTimeout(TIMEOUT_MS) {
+            dispatchRepo.requestRide("History Rider", pastQuote, "CASH").getOrThrow()
+        }
+        withTimeout(TIMEOUT_MS) {
+            dispatchRepo.cancelRide(pastRide, "RIDER", "Changed schedule", 0L).getOrThrow()
+        }
+
+        val riderHistory = withTimeout(FLOW_TIMEOUT_MS) {
+            dispatchRepo.observeRiderTripHistory(riderUid).first { list -> list.any { it.id == pastRide.id } }
+        }
+        assertTrue(riderHistory.any { it.id == pastRide.id && it.status == RideStatus.CANCELLED.name })
+        assertTrue(riderHistory.none { it.id == activeRide.id })
+
+        // Unauthenticated caller must receive PERMISSION_DENIED on driver trip history query
+        auth.signOut()
+        try {
+            withTimeout(FLOW_TIMEOUT_MS) {
+                dispatchRepo.observeDriverTripHistory("any_driver_id").first()
+            }
+            fail("Expected PERMISSION_DENIED for unauthenticated driver trip history query")
+        } catch (e: Exception) {
+            val fe = e.unwrapFirestoreException()
+            assertNotNull("Expected nested FirebaseFirestoreException, got $e", fe)
+            assertEquals(FirebaseFirestoreException.Code.PERMISSION_DENIED, fe!!.code)
+        }
+    }
+
+    @Test
+    fun fcmTokens_ownerRegistersUpdatesAndCrossUserDenied() = runBlocking {
+        val ownerEmail = "fcm_owner_${UUID.randomUUID().toString().take(8)}@test.com"
+        val intruderEmail = "fcm_other_${UUID.randomUUID().toString().take(8)}@test.com"
+
+        val ownerUid = signInTestUser(ownerEmail)
+        val tokenRepo = FcmTokenRepository(firestore, auth)
+
+        val saved = withTimeout(TIMEOUT_MS) {
+            tokenRepo.upsertFcmToken(
+                token = "fcm_device_token_pixel_8_pro_xyz",
+                activeMode = AccountMode.RIDER.name,
+                preferredLanguage = "en",
+                notificationsEnabled = true
+            ).getOrThrow()
+        }
+        assertEquals(ownerUid, saved.userId)
+        assertTrue(saved.notificationsEnabled)
+
+        val observed = withTimeout(FLOW_TIMEOUT_MS) {
+            tokenRepo.observeUserFcmTokens(ownerUid).first { it.isNotEmpty() }
+        }
+        assertEquals(1, observed.size)
+
+        withTimeout(TIMEOUT_MS) {
+            tokenRepo.updateNotificationPreference(saved.id, false).getOrThrow()
+        }
+
+        // Different authenticated user must NOT read or tamper with owner's FCM tokens
+        signInTestUser(intruderEmail)
+        try {
+            withTimeout(TIMEOUT_MS) {
+                firestore.collection("users").document(ownerUid)
+                    .collection("fcm_tokens").document(saved.id)
+                    .get().await()
+            }
+            fail("Expected PERMISSION_DENIED when intruder reads owner FCM token")
+        } catch (e: Exception) {
+            val fe = e.unwrapFirestoreException()
+            assertEquals(FirebaseFirestoreException.Code.PERMISSION_DENIED, fe?.code)
+        }
+    }
+
+    @Test
+    fun bidirectionalRatings_persistedAndVerifiedInFirestore() = runBlocking {
+        val riderEmail = "rate_rider_${UUID.randomUUID().toString().take(8)}@test.com"
+        val driverEmail = "rate_driver_${UUID.randomUUID().toString().take(8)}@test.com"
+        val intruderEmail = "rate_other_${UUID.randomUUID().toString().take(8)}@test.com"
+
+        val driverUid = signInTestUser(driverEmail)
+        val riderUid = signInTestUser(riderEmail)
+
+        val dispatchRepo = DispatchRepository(firestore, auth)
+        val policy = MarketCatalog.defaultPoliciesForAllMarkets().first { it.city == "Cairo" && !it.isTaxiReference }
+        val quote = PricingEngine.calculateQuote(
+            policy,
+            FareCalculationInput(riderUid, "Tahrir Square", 30.0444, 31.2357, "Maadi", 29.9602, 31.2569, 12.0, 18L)
+        )
+        val ride = withTimeout(TIMEOUT_MS) {
+            dispatchRepo.requestRide("Layla Rider", quote, "CASH").getOrThrow()
+        }
+
+        // Complete the ride using emulator admin token (simulating driver completing trip)
+        markRideCompletedAsEmulatorOwner(ride.id, driverUid, "Karim Driver")
+        val completedRide = withTimeout(FLOW_TIMEOUT_MS) {
+            dispatchRepo.observeRide(ride.id).first { it?.status == RideStatus.COMPLETED.name }!!
+        }
+
+        // 1. Rider rates Driver atomically with tags & raterName
+        val riderRes = withTimeout(TIMEOUT_MS) {
+            dispatchRepo.submitRating(
+                ride = completedRide,
+                toUserId = driverUid,
+                fromRole = "RIDER",
+                stars = 5L,
+                comment = "Very clean car and smooth driving!",
+                tags = listOf("CLEAN_VEHICLE", "SMOOTH_DRIVE"),
+                raterName = "Layla Rider"
+            )
+        }
+        assertTrue("Rider rating failed: ${riderRes.exceptionOrNull()}", riderRes.isSuccess)
+
+        // Verify rides/{id}.riderRated flag toggled to true
+        val rideAfterRiderRate = withTimeout(FLOW_TIMEOUT_MS) {
+            dispatchRepo.observeRide(ride.id).first { it?.riderRated == true }!!
+        }
+        assertTrue(rideAfterRiderRate.riderRated)
+
+        // Negative check: Rider cannot self-rate
+        val selfRateRes = withTimeout(TIMEOUT_MS) {
+            dispatchRepo.submitRating(completedRide, riderUid, "RIDER", 5L, "Self rate", emptyList(), "Layla")
+        }
+        assertTrue("Self-rating must fail", selfRateRes.isFailure)
+
+        // 2. Driver observes received 5-star rating and rates Passenger back (4 stars)
+        signInTestUser(driverEmail)
+        val driverReceived = withTimeout(FLOW_TIMEOUT_MS) {
+            dispatchRepo.observeRatingsReceived(driverUid).first { list -> list.any { it.rideId == ride.id } }
+        }
+        val riderRatingDoc = driverReceived.first { it.rideId == ride.id }
+        assertEquals(5L, riderRatingDoc.stars)
+        assertEquals(listOf("CLEAN_VEHICLE", "SMOOTH_DRIVE"), riderRatingDoc.tags)
+        assertEquals("Layla Rider", riderRatingDoc.raterName)
+
+        val driverRes = withTimeout(TIMEOUT_MS) {
+            dispatchRepo.submitRating(
+                ride = rideAfterRiderRate,
+                toUserId = riderUid,
+                fromRole = "DRIVER",
+                stars = 4L,
+                comment = "Ready at pickup point.",
+                tags = listOf("PUNCTUAL_RIDER"),
+                raterName = "Karim Driver"
+            )
+        }
+        assertTrue("Driver rating failed: ${driverRes.exceptionOrNull()}", driverRes.isSuccess)
+
+        // Verify Rider receives the 4-star passenger rating
+        signInTestUser(riderEmail)
+        val riderReceived = withTimeout(FLOW_TIMEOUT_MS) {
+            dispatchRepo.observeRatingsReceived(riderUid).first { list -> list.any { it.rideId == ride.id } }
+        }
+        assertEquals(4L, riderReceived.first { it.rideId == ride.id }.stars)
+        assertEquals(listOf("PUNCTUAL_RIDER"), riderReceived.first { it.rideId == ride.id }.tags)
+
+        // 3. Unrelated user cannot read private rating document
+        signInTestUser(intruderEmail)
+        try {
+            withTimeout(TIMEOUT_MS) {
+                firestore.collection("ratings").document("rat_${ride.id}_rider").get().await()
+            }
+            fail("Expected PERMISSION_DENIED for unrelated user reading rating")
+        } catch (e: Exception) {
+            val fe = e.unwrapFirestoreException()
+            assertEquals(FirebaseFirestoreException.Code.PERMISSION_DENIED, fe?.code)
+        }
+    }
+
+    private fun markRideCompletedAsEmulatorOwner(rideId: String, driverId: String, driverName: String) {
+        val url =
+            "http://127.0.0.1:8085/v1/projects/demo-no-project/databases/$databaseId/documents/rides/$rideId" +
+                "?updateMask.fieldPaths=status&updateMask.fieldPaths=driverId&updateMask.fieldPaths=driverName"
+        val bodyJson = """
+            {
+              "fields": {
+                "status": {"stringValue": "COMPLETED"},
+                "driverId": {"stringValue": "$driverId"},
+                "driverName": {"stringValue": "$driverName"}
+              }
+            }
+        """.trimIndent()
+        val request = Request.Builder()
+            .url(url)
+            .addHeader("Authorization", "Bearer owner")
+            .patch(bodyJson.toRequestBody("application/json".toMediaType()))
+            .build()
+        OkHttpClient().newCall(request).execute().use { response ->
+            check(response.isSuccessful) {
+                val err = response.body?.string().orEmpty()
+                "Emulator PATCH ride failed (${response.code}): $err"
+            }
+        }
     }
 
     private companion object {

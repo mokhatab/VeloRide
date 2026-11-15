@@ -1,5 +1,6 @@
 package com.example
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AdminPanelSettings
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
@@ -61,23 +63,32 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.example.core.ai.configureAppCheck
 import com.example.core.alerts.RideAlertPlayer
 import com.example.core.i18n.AppLanguage
 import com.example.core.i18n.StringsProvider
+import com.example.core.push.FcmPushCoordinator
+import com.example.core.push.TripStatusNotificationHelper
 import com.example.data.firestore.DispatchRepository
 import com.example.data.firestore.DriverRepository
+import com.example.data.firestore.FcmTokenRepository
 import com.example.data.firestore.PricingAndAdminRepository
 import com.example.data.firestore.UserRepository
 import com.example.domain.mapping.OsrmMappingProvider
 import com.example.domain.model.AccountMode
 import com.example.domain.model.RideStatus
+import com.example.domain.model.TripHistoryRole
 import com.example.domain.payment.StripePaymentGateway
 import com.example.ui.admin.AdminDashboardScreen
 import com.example.ui.admin.AdminViewModel
+import com.example.ui.ai.VeloAiScreen
+import com.example.ui.ai.VeloAiViewModel
 import com.example.ui.auth.AuthScreen
 import com.example.ui.auth.CompleteRegistrationScreen
 import com.example.ui.auth.GoogleAuthHelper
+import com.example.ui.components.PostTripRatingDialog
 import com.example.ui.driver.DriverWorkspaceScreen
+import com.example.ui.history.TripHistoryScreen
 import com.example.ui.main.VeloRideViewModel
 import com.example.ui.profile.ProfileScreen
 import com.example.ui.rider.RideActivityScreen
@@ -93,16 +104,44 @@ import kotlinx.coroutines.flow.callbackFlow
 
 const val ROUTE_HOME = "home"
 const val ROUTE_ACTIVITY = "activity"
+const val ROUTE_AI_ASSISTANT = "ai_assistant"
 const val ROUTE_PROFILE = "profile"
 const val ROUTE_ADMIN = "admin"
 const val ROUTE_DRIVER_ONBOARDING = "driver_onboarding"
+const val ROUTE_TRIP_HISTORY = "trip_history"
 
 class MainActivity : ComponentActivity() {
+    private var pendingDeepLinkRoute by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        configureAppCheck(this, intent)
+        TripStatusNotificationHelper.ensureChannel(this)
+        pendingDeepLinkRoute = extractNotificationRoute(intent)
         enableEdgeToEdge()
         setContent {
-            VeloRideRoot()
+            VeloRideRoot(
+                deepLinkRoute = pendingDeepLinkRoute,
+                onDeepLinkHandled = { pendingDeepLinkRoute = null }
+            )
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        extractNotificationRoute(intent)?.let { route ->
+            pendingDeepLinkRoute = route
+        }
+    }
+
+    private fun extractNotificationRoute(launchIntent: Intent?): String? {
+        val raw = launchIntent?.getStringExtra(TripStatusNotificationHelper.EXTRA_TARGET_ROUTE)
+            ?.trim()?.lowercase()
+            ?: return null
+        return when (raw) {
+            ROUTE_HOME, ROUTE_ACTIVITY, ROUTE_TRIP_HISTORY -> raw
+            else -> ROUTE_ACTIVITY
         }
     }
 }
@@ -117,7 +156,10 @@ private fun authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
 }
 
 @Composable
-fun VeloRideRoot() {
+fun VeloRideRoot(
+    deepLinkRoute: String? = null,
+    onDeepLinkHandled: () -> Unit = {}
+) {
     val currentUser by remember { authStateFlow() }.collectAsStateWithLifecycle(initialValue = Firebase.auth.currentUser)
     var selectedLanguage by remember { mutableStateOf(AppLanguage.DEFAULT) }
     var chosenRegistrationRole by remember { mutableStateOf(AccountMode.RIDER) }
@@ -138,7 +180,9 @@ fun VeloRideRoot() {
                         firebaseUser = currentUser!!,
                         selectedLanguage = selectedLanguage,
                         onLanguageChanged = { selectedLanguage = it },
-                        chosenRegistrationRole = chosenRegistrationRole
+                        chosenRegistrationRole = chosenRegistrationRole,
+                        deepLinkRoute = deepLinkRoute,
+                        onDeepLinkHandled = onDeepLinkHandled
                     )
                 }
             }
@@ -152,7 +196,9 @@ private fun AuthenticatedVeloRideShell(
     firebaseUser: FirebaseUser,
     selectedLanguage: AppLanguage,
     onLanguageChanged: (AppLanguage) -> Unit,
-    chosenRegistrationRole: AccountMode
+    chosenRegistrationRole: AccountMode,
+    deepLinkRoute: String?,
+    onDeepLinkHandled: () -> Unit
 ) {
     val context = LocalContext.current.applicationContext
     val uiContext = LocalContext.current
@@ -172,11 +218,16 @@ private fun AuthenticatedVeloRideShell(
                     pricingRepository = PricingAndAdminRepository(context),
                     mappingProvider = OsrmMappingProvider(context),
                     paymentGateway = StripePaymentGateway(),
-                    alertPlayer = RideAlertPlayer(context)
+                    alertPlayer = RideAlertPlayer(context),
+                    fcmTokenRepository = FcmTokenRepository(context),
+                    fcmPushCoordinator = FcmPushCoordinator(context),
+                    appContext = context
                 ) as T
             }
         }
     )
+
+    val aiViewModel: VeloAiViewModel = viewModel(key = "ai_${firebaseUser.uid}")
 
     val accountLoaded by veloViewModel.accountLoaded.collectAsStateWithLifecycle()
     val userAccount by veloViewModel.userAccount.collectAsStateWithLifecycle()
@@ -244,7 +295,9 @@ private fun AuthenticatedVeloRideShell(
     val paymentMethods by veloViewModel.paymentMethods.collectAsStateWithLifecycle()
     val riderRides by veloViewModel.riderRides.collectAsStateWithLifecycle()
     val driverRides by veloViewModel.driverRides.collectAsStateWithLifecycle()
-    val pendingOffers by veloViewModel.pendingDriverOffers.collectAsStateWithLifecycle()
+    val riderTripHistoryState by veloViewModel.riderTripHistoryState.collectAsStateWithLifecycle()
+    val driverTripHistoryState by veloViewModel.driverTripHistoryState.collectAsStateWithLifecycle()
+    val pendingOffers by veloViewModel.activeDriverOffers.collectAsStateWithLifecycle()
     val driverProfile by veloViewModel.driverProfile.collectAsStateWithLifecycle()
     val driverDocuments by veloViewModel.driverDocuments.collectAsStateWithLifecycle()
     val ownAvailability by veloViewModel.ownDriverAvailability.collectAsStateWithLifecycle()
@@ -255,11 +308,27 @@ private fun AuthenticatedVeloRideShell(
     val pricingPolicies by veloViewModel.pricingPolicies.collectAsStateWithLifecycle()
     val operationalConfig by veloViewModel.operationalConfig.collectAsStateWithLifecycle()
     val nowMs by veloViewModel.nowMs.collectAsStateWithLifecycle()
+    val engineTelemetry by veloViewModel.engineTelemetry.collectAsStateWithLifecycle()
+    val aiSelectedMode by aiViewModel.selectedMode.collectAsStateWithLifecycle()
+    val aiQueryState by aiViewModel.queryState.collectAsStateWithLifecycle()
+    val aiVoiceState by aiViewModel.voiceState.collectAsStateWithLifecycle()
+    val vmDeepLinkRoute by veloViewModel.pendingNavigationRoute.collectAsStateWithLifecycle()
+    val ratingsGiven by veloViewModel.ratingsGiven.collectAsStateWithLifecycle()
+    val pendingRatingPrompt by veloViewModel.pendingRatingPrompt.collectAsStateWithLifecycle()
 
     LaunchedEffect(bannerMessage) {
         bannerMessage?.let { msg ->
             snackbarHostState.showSnackbar(msg)
             veloViewModel.clearBanner()
+        }
+    }
+
+    LaunchedEffect(deepLinkRoute, vmDeepLinkRoute) {
+        val target = deepLinkRoute ?: vmDeepLinkRoute
+        if (target != null && target in setOf(ROUTE_HOME, ROUTE_ACTIVITY, ROUTE_TRIP_HISTORY)) {
+            navController.navigate(target) { launchSingleTop = true }
+            if (deepLinkRoute != null) onDeepLinkHandled()
+            if (vmDeepLinkRoute != null) veloViewModel.consumePendingNavigationRoute()
         }
     }
 
@@ -286,6 +355,12 @@ private fun AuthenticatedVeloRideShell(
                         onClick = { navController.navigate(ROUTE_ACTIVITY) { launchSingleTop = true } },
                         icon = { Icon(Icons.Default.History, contentDescription = strings.navActivity) },
                         label = { Text(strings.navActivity) }
+                    )
+                    NavigationRailItem(
+                        selected = currentRoute == ROUTE_AI_ASSISTANT,
+                        onClick = { navController.navigate(ROUTE_AI_ASSISTANT) { launchSingleTop = true } },
+                        icon = { Icon(Icons.Default.AutoAwesome, contentDescription = strings.navAiCopilot) },
+                        label = { Text(strings.navAiCopilot) }
                     )
                     NavigationRailItem(
                         selected = currentRoute == ROUTE_PROFILE,
@@ -348,6 +423,13 @@ private fun AuthenticatedVeloRideShell(
                                 modifier = Modifier.testTag("nav_activity")
                             )
                             NavigationBarItem(
+                                selected = currentRoute == ROUTE_AI_ASSISTANT,
+                                onClick = { navController.navigate(ROUTE_AI_ASSISTANT) { launchSingleTop = true } },
+                                icon = { Icon(Icons.Default.AutoAwesome, contentDescription = strings.navAiCopilot) },
+                                label = { Text(strings.navAiCopilot) },
+                                modifier = Modifier.testTag("nav_ai_copilot")
+                            )
+                            NavigationBarItem(
                                 selected = currentRoute == ROUTE_PROFILE,
                                 onClick = { navController.navigate(ROUTE_PROFILE) { launchSingleTop = true } },
                                 icon = { Icon(Icons.Default.Person, contentDescription = strings.navProfile) },
@@ -384,6 +466,8 @@ private fun AuthenticatedVeloRideShell(
                                 availability = ownAvailability,
                                 pendingOffers = pendingOffers,
                                 driverRides = driverRides,
+                                driverHistoryState = driverTripHistoryState,
+                                payments = riderPayments,
                                 earnings = driverEarnings,
                                 payouts = driverPayouts,
                                 nowMs = nowMs,
@@ -399,7 +483,8 @@ private fun AuthenticatedVeloRideShell(
                                 savedLocations = savedLocations,
                                 activeRide = activeRide,
                                 viewModel = veloViewModel,
-                                onOpenActiveActivity = { navController.navigate(ROUTE_ACTIVITY) }
+                                onOpenActiveActivity = { navController.navigate(ROUTE_ACTIVITY) },
+                                onOpenAiCopilot = { navController.navigate(ROUTE_AI_ASSISTANT) { launchSingleTop = true } }
                             )
                         }
                     }
@@ -413,7 +498,47 @@ private fun AuthenticatedVeloRideShell(
                             notifications = notifications,
                             assignedDriverLocation = assignedDriverLocation,
                             stripeStatus = veloViewModel.stripeStatus,
-                            viewModel = veloViewModel
+                            viewModel = veloViewModel,
+                            onOpenTripHistory = {
+                                navController.navigate(ROUTE_TRIP_HISTORY) { launchSingleTop = true }
+                            }
+                        )
+                    }
+
+                    composable(ROUTE_TRIP_HISTORY) {
+                        BackHandler { navController.popBackStack() }
+                        TripHistoryScreen(
+                            language = selectedLanguage,
+                            initialRole = if (isDriverMode) TripHistoryRole.DRIVER else TripHistoryRole.RIDER,
+                            showRoleSwitcher = account.hasDriverProfile || driverProfile != null,
+                            riderHistoryState = riderTripHistoryState,
+                            driverHistoryState = driverTripHistoryState,
+                            payments = riderPayments,
+                            ratingsGiven = ratingsGiven,
+                            onRateTrip = { ride, role ->
+                                veloViewModel.openRatingPrompt(
+                                    ride = ride,
+                                    raterRole = if (role == TripHistoryRole.DRIVER) "DRIVER" else "RIDER"
+                                )
+                            },
+                            onBack = { navController.popBackStack() }
+                        )
+                    }
+
+                    composable(ROUTE_AI_ASSISTANT) {
+                        BackHandler { navController.popBackStack() }
+                        VeloAiScreen(
+                            language = selectedLanguage,
+                            cityName = bookingState.detectedMarket.city,
+                            pickupPoint = bookingState.pickupPoint,
+                            selectedMode = aiSelectedMode,
+                            queryState = aiQueryState,
+                            voiceState = aiVoiceState,
+                            aiViewModel = aiViewModel,
+                            onApplyPlaceAsDestinationQuery = { placeTitle ->
+                                veloViewModel.searchDestination(placeTitle)
+                                navController.navigate(ROUTE_HOME) { launchSingleTop = true }
+                            }
                         )
                     }
 
@@ -428,6 +553,9 @@ private fun AuthenticatedVeloRideShell(
                             viewModel = veloViewModel,
                             onLanguageSelected = onLanguageChanged,
                             onNeedDriverOnboarding = { navController.navigate(ROUTE_DRIVER_ONBOARDING) },
+                            onOpenTripHistory = {
+                                navController.navigate(ROUTE_TRIP_HISTORY) { launchSingleTop = true }
+                            },
                             onSignOut = {
                                 GoogleAuthHelper.signOut(credentialManager, scope)
                             }
@@ -444,6 +572,8 @@ private fun AuthenticatedVeloRideShell(
                             availability = ownAvailability,
                             pendingOffers = pendingOffers,
                             driverRides = driverRides,
+                            driverHistoryState = driverTripHistoryState,
+                            payments = riderPayments,
                             earnings = driverEarnings,
                             payouts = driverPayouts,
                             nowMs = nowMs,
@@ -492,12 +622,38 @@ private fun AuthenticatedVeloRideShell(
                                 auditLogs = logs,
                                 pricingPolicies = pricingPolicies,
                                 operationalConfig = operationalConfig,
-                                adminViewModel = adminVm
+                                adminViewModel = adminVm,
+                                engineTelemetry = engineTelemetry,
+                                onRun5000RiderBenchmark = { veloViewModel.runAdmin5000RiderScaleBenchmark() },
+                                onRunRaceGuardCheck = { veloViewModel.runRaceConditionVerification() },
+                                onConnectWebSocket = { url -> veloViewModel.connectLocationWebSocket(url) },
+                                onRefreshEngineTelemetry = { veloViewModel.refreshEngineTelemetry() }
                             )
                         }
                     }
                 }
             }
+        }
+
+        pendingRatingPrompt?.let { prompt ->
+            PostTripRatingDialog(
+                language = selectedLanguage,
+                ride = prompt.ride,
+                raterRole = prompt.raterRole,
+                counterpartyName = prompt.counterpartyName,
+                isSubmitting = isBusy,
+                onDismiss = { veloViewModel.dismissRatingPrompt(prompt) },
+                onSubmit = { stars, comment, tags ->
+                    veloViewModel.rateTrip(
+                        ride = prompt.ride,
+                        toUserId = prompt.toUserId,
+                        fromRole = prompt.raterRole,
+                        stars = stars,
+                        comment = comment,
+                        tags = tags
+                    )
+                }
+            )
         }
     }
 }

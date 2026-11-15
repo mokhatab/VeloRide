@@ -61,6 +61,24 @@
       },
       "required": ["userId", "brand", "last4", "expiryMonth", "expiryYear", "stripePaymentMethodId", "methodType", "isDefault", "createdAt", "updatedAt"]
     },
+    "UserFcmToken": {
+      "title": "UserFcmToken",
+      "description": "Firebase Cloud Messaging registration token and push preferences per authenticated user device.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "token": { "type": "string" },
+        "platform": { "type": "string", "enum": ["ANDROID"] },
+        "deviceModel": { "type": "string" },
+        "appVersion": { "type": "string" },
+        "activeMode": { "type": "string", "enum": ["RIDER", "DRIVER"] },
+        "preferredLanguage": { "type": "string", "enum": ["ar", "en", "de", "fr", "es", "it", "ru"] },
+        "notificationsEnabled": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "token", "platform", "deviceModel", "appVersion", "activeMode", "preferredLanguage", "notificationsEnabled", "createdAt", "updatedAt"]
+    },
     "DriverProfile": {
       "title": "DriverProfile",
       "description": "Driver personal, vehicle, and approval workflow profile.",
@@ -440,6 +458,11 @@
         "fromRole": { "type": "string", "enum": ["RIDER", "DRIVER"] },
         "stars": { "type": "integer" },
         "comment": { "type": "string" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "raterName": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["rideId", "fromUserId", "toUserId", "fromRole", "stars", "comment", "createdAt"]
@@ -520,6 +543,10 @@
     "/users/{userId}/payment_methods/{methodId}": {
       "schema": { "$ref": "#/entities/PaymentMethod" },
       "description": "Tokenized Stripe payment methods."
+    },
+    "/users/{userId}/fcm_tokens/{tokenId}": {
+      "schema": { "$ref": "#/entities/UserFcmToken" },
+      "description": "Firebase Cloud Messaging device registration tokens."
     },
     "/driver_profiles/{driverId}": {
       "schema": { "$ref": "#/entities/DriverProfile" },

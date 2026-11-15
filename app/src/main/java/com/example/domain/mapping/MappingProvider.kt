@@ -5,7 +5,8 @@ import android.location.Geocoder
 import android.os.Build
 import com.example.domain.pricing.MarketCatalog
 import com.squareup.moshi.Json
-import com.squareup.moshi.JsonClass
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -61,25 +62,21 @@ interface MappingProvider {
     fun haversineKm(a: GeoPoint, b: GeoPoint): Double
 }
 
-@JsonClass(generateAdapter = true)
 data class OsrmRouteResponse(
     val code: String? = null,
     val routes: List<OsrmRoute>? = null
 )
 
-@JsonClass(generateAdapter = true)
 data class OsrmRoute(
     val distance: Double = 0.0,
     val duration: Double = 0.0,
     val geometry: OsrmGeometry? = null
 )
 
-@JsonClass(generateAdapter = true)
 data class OsrmGeometry(
     val coordinates: List<List<Double>> = emptyList()
 )
 
-@JsonClass(generateAdapter = true)
 data class NominatimPlace(
     @Json(name = "display_name") val displayName: String = "",
     val lat: String = "0",
@@ -116,11 +113,15 @@ class OsrmMappingProvider(
             .build()
     }
 
+    private val moshi: Moshi by lazy {
+        Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
+    }
+
     private val osrmApi: OsrmApi by lazy {
         Retrofit.Builder()
             .baseUrl("https://router.project-osrm.org/")
             .client(client)
-            .addConverterFactory(MoshiConverterFactory.create())
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
             .create(OsrmApi::class.java)
     }
@@ -129,7 +130,7 @@ class OsrmMappingProvider(
         Retrofit.Builder()
             .baseUrl("https://nominatim.openstreetmap.org/")
             .client(client)
-            .addConverterFactory(MoshiConverterFactory.create())
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
             .create(NominatimApi::class.java)
     }

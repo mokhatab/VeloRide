@@ -107,6 +107,19 @@ service cloud.firestore {
              isValidTimestamp(data.updatedAt);
     }
 
+    function isValidUserFcmToken(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.token is string && data.token.size() >= 10 && data.token.size() <= 512 &&
+             data.platform == 'ANDROID' &&
+             data.deviceModel is string && data.deviceModel.size() <= 120 &&
+             data.appVersion is string && data.appVersion.size() <= 40 &&
+             data.activeMode in ['RIDER', 'DRIVER'] &&
+             isValidLanguage(data.preferredLanguage) &&
+             data.notificationsEnabled is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
     function isValidDriverProfile(data) {
       return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
              data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
@@ -208,6 +221,7 @@ service cloud.firestore {
              data.quoteId is string && data.quoteId.size() >= 1 && data.quoteId.size() <= 128 &&
              data.paymentStatus in ['PENDING', 'REQUIRES_ACTION', 'AUTHORIZED', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'REFUNDED', 'PARTIALLY_REFUNDED'] &&
              (!('paymentMethodId' in data) || data.paymentMethodId == null || (data.paymentMethodId is string && data.paymentMethodId.size() <= 128)) &&
+             (!('offeredDriverIds' in data) || (data.offeredDriverIds is list && data.offeredDriverIds.size() <= 30)) &&
              (!('cancellationInitiator' in data) || data.cancellationInitiator == null || (data.cancellationInitiator is string && data.cancellationInitiator.size() <= 30)) &&
              (!('cancellationReason' in data) || data.cancellationReason == null || (data.cancellationReason is string && data.cancellationReason.size() <= 240)) &&
              data.cancellationFeeMinor is int && data.cancellationFeeMinor >= 0 &&
@@ -402,9 +416,12 @@ service cloud.firestore {
       return data.rideId is string && data.rideId.size() >= 1 && data.rideId.size() <= 128 &&
              data.fromUserId is string && data.fromUserId.size() >= 1 && data.fromUserId.size() <= 128 &&
              data.toUserId is string && data.toUserId.size() >= 1 && data.toUserId.size() <= 128 &&
+             data.fromUserId != data.toUserId &&
              data.fromRole in ['RIDER', 'DRIVER'] &&
              data.stars is int && data.stars >= 1 && data.stars <= 5 &&
              data.comment is string && data.comment.size() <= 400 &&
+             (!('tags' in data) || (data.tags is list && data.tags.size() <= 6)) &&
+             (!('raterName' in data) || (data.raterName is string && data.raterName.size() <= 120)) &&
              isValidTimestamp(data.createdAt);
     }
 
@@ -527,6 +544,22 @@ service cloud.firestore {
                          incoming().createdAt == existing().createdAt &&
                          incoming().diff(existing()).affectedKeys().hasOnly(['isDefault', 'updatedAt']);
         allow delete: if isValidId(methodId) && (isOwner(userId) || isAdmin());
+      }
+
+      match /fcm_tokens/{tokenId} {
+        allow get: if isValidId(userId) && isValidId(tokenId) && (isOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow create: if isOwner(userId) && isValidId(tokenId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll(['userId', 'token', 'platform', 'deviceModel', 'appVersion', 'activeMode', 'preferredLanguage', 'notificationsEnabled', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'token', 'platform', 'deviceModel', 'appVersion', 'activeMode', 'preferredLanguage', 'notificationsEnabled', 'createdAt', 'updatedAt']) &&
+                         isValidUserFcmToken(incoming());
+        allow update: if isOwner(userId) && isValidId(tokenId) &&
+                         isValidUserFcmToken(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['token', 'deviceModel', 'appVersion', 'activeMode', 'preferredLanguage', 'notificationsEnabled', 'updatedAt']);
+        allow delete: if isValidId(tokenId) && (isOwner(userId) || isAdmin());
       }
     }
 
@@ -689,7 +722,7 @@ service cloud.firestore {
               existing().status in ['REQUESTED', 'SEARCHING_FOR_DRIVER', 'OFFERED', 'NO_DRIVER_AVAILABLE'] &&
               incoming().status in ['SEARCHING_FOR_DRIVER', 'OFFERED', 'NO_DRIVER_AVAILABLE', 'EXPIRED'] &&
               incoming().driverId == '' &&
-              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'dispatchRound', 'updatedAt'])
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'dispatchRound', 'offeredDriverIds', 'updatedAt'])
             ) ||
             // Action 2: Rider cancels before trip starts
             (
@@ -778,13 +811,29 @@ service cloud.firestore {
               getAfter(/databases/$(database)/documents/rides/$(existing().rideId)).data.driverId == request.auth.uid &&
               incoming().diff(existing()).affectedKeys().hasOnly(['status', 'respondedAtMs', 'updatedAt'])
             ) ||
-            // Driver rejects or expires
+            // Driver rejects, expires, or observes another driver already won the ride
             (
               existing().driverId == request.auth.uid &&
-              incoming().status in ['REJECTED', 'EXPIRED'] &&
+              (
+                incoming().status in ['REJECTED', 'EXPIRED'] ||
+                (
+                  incoming().status == 'CANCELLED_BY_OTHER' &&
+                  get(/databases/$(database)/documents/rides/$(existing().rideId)).data.driverId != '' &&
+                  get(/databases/$(database)/documents/rides/$(existing().rideId)).data.driverId != request.auth.uid
+                )
+              ) &&
               incoming().diff(existing()).affectedKeys().hasOnly(['status', 'respondedAtMs', 'updatedAt'])
             ) ||
-            // Rider invalidates competing or timed-out offers
+            // Winning assigned driver OR rider immediately revokes competing offers in the same second
+            (
+              incoming().status == 'CANCELLED_BY_OTHER' &&
+              (
+                existing().riderId == request.auth.uid ||
+                get(/databases/$(database)/documents/rides/$(existing().rideId)).data.driverId == request.auth.uid
+              ) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+            ) ||
+            // Rider invalidates timed-out offers
             (
               existing().riderId == request.auth.uid &&
               incoming().status in ['EXPIRED', 'CANCELLED_BY_OTHER'] &&
@@ -903,7 +952,24 @@ service cloud.firestore {
                      (isSignedIn() && existing().toUserId == request.auth.uid);
       allow create: if isSignedIn() && isValidId(ratingId) &&
                        incoming().fromUserId == request.auth.uid &&
-                       isValidRating(incoming());
+                       incoming().keys().hasAll(['rideId', 'fromUserId', 'toUserId', 'fromRole', 'stars', 'comment', 'createdAt']) &&
+                       incoming().keys().hasOnly(['rideId', 'fromUserId', 'toUserId', 'fromRole', 'stars', 'comment', 'tags', 'raterName', 'createdAt']) &&
+                       isValidRating(incoming()) &&
+                       ratingId == ('rat_' + incoming().rideId + '_' + (incoming().fromRole == 'RIDER' ? 'rider' : 'driver')) &&
+                       exists(/databases/$(database)/documents/rides/$(incoming().rideId)) &&
+                       get(/databases/$(database)/documents/rides/$(incoming().rideId)).data.status == 'COMPLETED' &&
+                       (
+                         (
+                           incoming().fromRole == 'RIDER' &&
+                           get(/databases/$(database)/documents/rides/$(incoming().rideId)).data.riderId == request.auth.uid &&
+                           get(/databases/$(database)/documents/rides/$(incoming().rideId)).data.driverId == incoming().toUserId
+                         ) ||
+                         (
+                           incoming().fromRole == 'DRIVER' &&
+                           get(/databases/$(database)/documents/rides/$(incoming().rideId)).data.driverId == request.auth.uid &&
+                           get(/databases/$(database)/documents/rides/$(incoming().rideId)).data.riderId == incoming().toUserId
+                         )
+                       );
       allow update, delete: if false;
     }
 

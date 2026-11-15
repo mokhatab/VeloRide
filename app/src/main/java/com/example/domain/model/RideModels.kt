@@ -61,6 +61,7 @@ data class Ride(
     val quoteId: String = "",
     val paymentStatus: String = "PENDING",
     val paymentMethodId: String? = null,
+    val offeredDriverIds: List<String> = emptyList(),
     val cancellationInitiator: String? = null,
     val cancellationReason: String? = null,
     val cancellationFeeMinor: Long = 0L,
@@ -121,5 +122,7 @@ data class RatingRecord(
     val fromRole: String = "RIDER",
     val stars: Long = 5L,
     val comment: String = "",
+    val tags: List<String> = emptyList(),
+    val raterName: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null
 )

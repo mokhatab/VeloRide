@@ -15,10 +15,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.AirportShuttle
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BookmarkAdd
+import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.LocalTaxi
+import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
@@ -27,6 +31,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -54,6 +59,7 @@ import com.example.core.i18n.StringsProvider
 import com.example.domain.model.DriverAvailability
 import com.example.domain.model.Ride
 import com.example.domain.model.RideStatus
+import com.example.domain.model.RiderPaymentChoice
 import com.example.domain.model.SavedLocation
 import com.example.domain.model.VehicleCategory
 import com.example.domain.pricing.MarketCatalog
@@ -70,7 +76,8 @@ fun RiderHomeScreen(
     savedLocations: List<SavedLocation>,
     activeRide: Ride?,
     viewModel: VeloRideViewModel,
-    onOpenActiveActivity: () -> Unit
+    onOpenActiveActivity: () -> Unit,
+    onOpenAiCopilot: () -> Unit = {}
 ) {
     val strings = remember(language) { StringsProvider.get(language) }
     var searchQuery by remember { mutableStateOf("") }
@@ -234,6 +241,23 @@ fun RiderHomeScreen(
                     ) {
                         Icon(Icons.Default.Search, contentDescription = strings.destinationLabel)
                     }
+                }
+
+                FilledTonalButton(
+                    onClick = onOpenAiCopilot,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("open_ai_copilot_shortcut")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = strings.navAiCopilot,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.size(8.dp))
+                    Text("${strings.navAiCopilot} • ${strings.liveVoiceTitle}", fontWeight = FontWeight.SemiBold)
                 }
 
                 if (bookingState.searchResults.isNotEmpty()) {
@@ -417,6 +441,78 @@ fun RiderHomeScreen(
                         }
                     }
                 }
+            }
+        }
+
+        // Automatic Stripe / Cash Settlement Selector
+        Text(
+            text = strings.paymentMethodTitle,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            RiderPaymentChoice.entries.forEach { choice ->
+                val selected = bookingState.selectedPaymentChoice == choice
+                val icon = when (choice) {
+                    RiderPaymentChoice.CASH -> Icons.Default.Payments
+                    RiderPaymentChoice.E_WALLET -> Icons.Default.AccountBalanceWallet
+                    RiderPaymentChoice.CARD -> Icons.Default.CreditCard
+                }
+                val title = when (choice) {
+                    RiderPaymentChoice.CASH -> strings.paymentCash
+                    RiderPaymentChoice.E_WALLET -> strings.paymentEWallet
+                    RiderPaymentChoice.CARD -> strings.paymentCard
+                }
+                val subtitle = when (choice) {
+                    RiderPaymentChoice.CASH -> strings.paymentCashHint
+                    RiderPaymentChoice.E_WALLET -> strings.paymentEWalletHint
+                    RiderPaymentChoice.CARD -> strings.stripeNotConfigured.takeIf { !bookingState.stripeAutoConfig.stripeGatewayLive } ?: "Stripe"
+                }
+                Card(
+                    onClick = { viewModel.selectPaymentChoice(choice) },
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface
+                    ),
+                    border = BorderStroke(
+                        if (selected) 2.dp else 1.dp,
+                        if (selected) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline
+                    ),
+                    modifier = Modifier.testTag("payment_choice_${choice.name}")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(icon, contentDescription = title)
+                        Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+        if (bookingState.stripeAutoConfig.summaryMessage.isNotBlank()) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = if (bookingState.selectedPaymentChoice == RiderPaymentChoice.CASH) {
+                    MaterialTheme.colorScheme.surfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("stripe_auto_config_summary")
+            ) {
+                Text(
+                    text = bookingState.stripeAutoConfig.summaryMessage,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                )
             }
         }
 

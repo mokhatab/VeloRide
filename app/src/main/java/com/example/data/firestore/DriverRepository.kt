@@ -2,6 +2,10 @@ package com.example.data.firestore
 
 import android.content.Context
 import com.example.R
+import com.example.core.engine.ConditionalEngineStats
+import com.example.core.engine.ConditionalUpdateEngine
+import com.example.core.engine.ConditionalUpdateResult
+import com.example.core.engine.VeloInMemoryStore
 import com.example.domain.mapping.GeoPoint
 import com.example.domain.model.DriverApprovalStatus
 import com.example.domain.model.DriverAvailability
@@ -29,13 +33,16 @@ import java.util.UUID
 
 class DriverRepository(
     private val db: FirebaseFirestore,
-    private val auth: FirebaseAuth = Firebase.auth
+    private val auth: FirebaseAuth = Firebase.auth,
+    private val locationCasEngine: ConditionalUpdateEngine<String, DriverAvailability> = ConditionalUpdateEngine()
 ) {
     constructor(context: Context) : this(
         FirebaseFirestore.getInstance(
             context.applicationContext.getString(R.string.firestore_database_id)
         )
     )
+
+    fun locationCasStats(): ConditionalEngineStats = locationCasEngine.stats()
 
     private fun requireUserId(): String {
         return auth.currentUser?.uid
@@ -107,7 +114,12 @@ class DriverRepository(
             .whereEqualTo("status", DriverOnlineStatus.ONLINE.name)
         emitAll(
             query.snapshots()
-                .map { it.toObjects(DriverAvailability::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+                .map { snap ->
+                    snap.toObjects(DriverAvailability::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .also { drivers ->
+                            VeloInMemoryStore.driverLocations.putAll(drivers.associateBy { it.driverId })
+                        }
+                }
                 .catch { error ->
                     val fe = generateSequence(error) { it.cause }.filterIsInstance<FirebaseFirestoreException>().firstOrNull()
                     if (fe == null && error is CancellationException) throw error
@@ -382,8 +394,8 @@ class DriverRepository(
     }
 
     /**
-     * Monotonic GPS update: rejects invalid coordinates or delayed older timestamps
-     * both locally and via Firestore security rules.
+     * Monotonic GPS update with conditional concurrency guard: rejects invalid coordinates,
+     * stale timestamps, or concurrent out-of-order writes both in-memory (CAS) and atomically in Firestore.
      */
     suspend fun updateLiveLocation(
         point: GeoPoint,
@@ -396,23 +408,49 @@ class DriverRepository(
             return Result.failure(IllegalArgumentException("Invalid GPS coordinates"))
         }
         val uid = requireUserId()
+        val cached = VeloInMemoryStore.driverLocations.get(uid)
+        val candidate = (cached ?: DriverAvailability(driverId = uid)).copy(
+            latitude = point.latitude,
+            longitude = point.longitude,
+            heading = heading.coerceIn(0.0, 360.0),
+            locationTimestampMs = locationTimestampMs,
+            activeRideId = activeRideId
+        )
+        val casOutcome = locationCasEngine.upsertIfNewer(
+            key = uid,
+            incomingVersion = (locationCasEngine.get(uid)?.version ?: 0L) + 1L,
+            incomingTimestampMs = locationTimestampMs,
+            value = candidate
+        )
+        if (casOutcome is ConditionalUpdateResult.StaleTimestamp) {
+            return Result.failure(
+                IllegalStateException("Stale GPS packet blocked locally ($locationTimestampMs < ${casOutcome.latestTimestampMs})")
+            )
+        }
+
         val availRef = db.collection("driver_availability").document(uid)
         return try {
-            val snap = availRef.get().await()
-            if (!snap.exists()) return Result.failure(IllegalStateException("Availability record missing"))
-            val prevTs = snap.getLong("locationTimestampMs") ?: 0L
-            if (locationTimestampMs < prevTs) {
-                return Result.failure(IllegalStateException("Outdated GPS update rejected ($locationTimestampMs < $prevTs)"))
-            }
-            availRef.update(
-                mapOf(
-                    "latitude" to point.latitude,
-                    "longitude" to point.longitude,
-                    "heading" to heading.coerceIn(0.0, 360.0),
-                    "locationTimestampMs" to locationTimestampMs,
-                    "updatedAt" to FieldValue.serverTimestamp()
+            db.runTransaction { tx ->
+                val snap = tx.get(availRef)
+                if (!snap.exists()) throw IllegalStateException("Availability record missing")
+                val prevTs = snap.getLong("locationTimestampMs") ?: 0L
+                if (locationTimestampMs < prevTs) {
+                    throw IllegalStateException("Outdated GPS update rejected ($locationTimestampMs < $prevTs)")
+                }
+                tx.update(
+                    availRef,
+                    mapOf(
+                        "latitude" to point.latitude,
+                        "longitude" to point.longitude,
+                        "heading" to heading.coerceIn(0.0, 360.0),
+                        "locationTimestampMs" to locationTimestampMs,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
                 )
-            ).await()
+                null
+            }.await()
+
+            VeloInMemoryStore.driverLocations.put(uid, candidate)
 
             // Record historical GPS breadcrumb with controlled access
             val histId = "loc_${UUID.randomUUID().toString().replace("-", "").take(14)}"

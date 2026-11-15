@@ -1,5 +1,10 @@
 package com.example.ui.rider
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,9 +17,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ReceiptLong
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Payments
-import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.ReportProblem
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
@@ -22,6 +29,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,17 +47,22 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.core.i18n.AppLanguage
 import com.example.core.i18n.LocaleFormatter
 import com.example.core.i18n.StringsProvider
+import com.example.domain.model.AccountMode
 import com.example.domain.model.AppNotification
 import com.example.domain.model.DriverAvailability
 import com.example.domain.model.PaymentRecord
 import com.example.domain.model.Ride
 import com.example.domain.model.RideStatus
+import com.example.domain.model.RiderPaymentChoice
 import com.example.domain.payment.StripeConfigurationStatus
 import com.example.ui.main.VeloRideViewModel
 
@@ -61,14 +74,32 @@ fun RideActivityScreen(
     notifications: List<AppNotification>,
     assignedDriverLocation: DriverAvailability?,
     stripeStatus: StripeConfigurationStatus,
-    viewModel: VeloRideViewModel
+    viewModel: VeloRideViewModel,
+    onOpenTripHistory: () -> Unit = {}
 ) {
     val strings = remember(language) { StringsProvider.get(language) }
+    val context = LocalContext.current
+    var hasNotificationPermission by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val notificationPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasNotificationPermission = granted
+        if (granted) {
+            viewModel.refreshFcmToken()
+        }
+    }
+
+    val userAccount by viewModel.userAccount.collectAsStateWithLifecycle()
+    val ratingsGiven by viewModel.ratingsGiven.collectAsStateWithLifecycle()
+    val raterRole = if (userAccount?.activeMode == AccountMode.DRIVER.name) "DRIVER" else "RIDER"
+
     var rideToCancel by remember { mutableStateOf<Ride?>(null) }
     var cancelReason by remember { mutableStateOf("Changed plans") }
-    var rideToRate by remember { mutableStateOf<Ride?>(null) }
-    var ratingStars by remember { mutableLongStateOf(5L) }
-    var ratingComment by remember { mutableStateOf("") }
     var rideForComplaint by remember { mutableStateOf<Ride?>(null) }
     var complaintText by remember { mutableStateOf("") }
 
@@ -78,6 +109,32 @@ fun RideActivityScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        if (!hasNotificationPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.NotificationsActive, contentDescription = strings.fcmPushTitle)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(strings.fcmPushTitle, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Text(strings.fcmPushSubtitle, style = MaterialTheme.typography.bodySmall)
+                        }
+                        Button(
+                            onClick = { notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) },
+                            modifier = Modifier.testTag("activity_grant_notifications_button")
+                        ) {
+                            Text(strings.grantNotificationPermission)
+                        }
+                    }
+                }
+            }
+        }
         // Honest Stripe Gateway Configuration Notice
         item {
             Card(
@@ -122,7 +179,12 @@ fun RideActivityScreen(
             }
             items(notifications.take(5), key = { it.id }) { note ->
                 Card(
-                    onClick = { viewModel.markNotificationRead(note.id) },
+                    onClick = {
+                        viewModel.markNotificationRead(note.id)
+                        if (note.eventType in listOf("TRIP_COMPLETED", "RIDE_CANCELLED", "NO_DRIVER_AVAILABLE")) {
+                            onOpenTripHistory()
+                        }
+                    },
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Row(
@@ -148,6 +210,42 @@ fun RideActivityScreen(
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = strings.tripHistoryTitle,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = strings.tripHistorySubtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    FilledTonalButton(
+                        onClick = onOpenTripHistory,
+                        modifier = Modifier.testTag("open_trip_history_button")
+                    ) {
+                        Icon(Icons.Default.History, contentDescription = strings.tripHistoryTitle)
+                        Spacer(modifier = Modifier.height(0.dp))
+                        Text(" ${strings.viewTripHistory}")
                     }
                 }
             }
@@ -223,8 +321,24 @@ fun RideActivityScreen(
 
                         Text("${strings.pickupLabel}: ${ride.pickupAddress}", style = MaterialTheme.typography.bodyMedium)
                         Text("${strings.destinationLabel}: ${ride.destinationAddress}", style = MaterialTheme.typography.bodyMedium)
+                        val rideEpochMs = (ride.updatedAt?.seconds ?: ride.createdAt?.seconds ?: 0L) * 1000L
+                        val rideDateLabel = if (rideEpochMs > 0L) {
+                            LocaleFormatter.formatDateTime(rideEpochMs, language)
+                        } else ""
+                        val choice = RiderPaymentChoice.fromRidePaymentMethodId(ride.paymentMethodId)
+                        val settlementLabel = when (choice) {
+                            RiderPaymentChoice.CASH -> strings.paymentCash
+                            RiderPaymentChoice.E_WALLET -> strings.paymentEWallet
+                            RiderPaymentChoice.CARD -> strings.paymentCard
+                        }
                         Text(
-                            text = "${ride.vehicleCategory} • ${strings.pricingVersionLabel} v${ride.pricingVersion} • ${ride.city}",
+                            text = listOfNotNull(
+                                rideDateLabel.takeIf { it.isNotBlank() },
+                                ride.vehicleCategory,
+                                settlementLabel,
+                                "${strings.pricingVersionLabel} v${ride.pricingVersion}",
+                                ride.city
+                            ).joinToString(" • "),
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -250,15 +364,15 @@ fun RideActivityScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Icon(Icons.Default.ReceiptLong, contentDescription = null)
+                                Icon(Icons.AutoMirrored.Filled.ReceiptLong, contentDescription = null)
                                 Text(
-                                    text = "Receipt ${paymentForRide.receiptNumber} • ${paymentForRide.status}" +
+                                    text = "Receipt ${paymentForRide.receiptNumber} (${paymentForRide.paymentMethodType}) • ${paymentForRide.status}" +
                                         (paymentForRide.failureReason?.let { " ($it)" } ?: ""),
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = if (paymentForRide.status == "SUCCEEDED") {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.error
+                                    color = when {
+                                        paymentForRide.status == "SUCCEEDED" -> MaterialTheme.colorScheme.primary
+                                        paymentForRide.paymentMethodType == "CASH" -> MaterialTheme.colorScheme.secondary
+                                        else -> MaterialTheme.colorScheme.error
                                     }
                                 )
                             }
@@ -305,12 +419,37 @@ fun RideActivityScreen(
                                 }
                             }
 
-                            if (ride.status == RideStatus.COMPLETED.name && !ride.riderRated && ride.driverId.isNotBlank()) {
+                            val givenRating = ratingsGiven.firstOrNull {
+                                it.rideId == ride.id && it.fromRole.equals(raterRole, ignoreCase = true)
+                            }
+                            val alreadyRatedFlag = if (raterRole == "DRIVER") ride.driverRated else ride.riderRated
+                            val isAlreadyRated = alreadyRatedFlag || givenRating != null
+                            val counterpartyId = if (raterRole == "DRIVER") ride.riderId else ride.driverId
+
+                            if (ride.status == RideStatus.COMPLETED.name && !isAlreadyRated && counterpartyId.isNotBlank()) {
                                 OutlinedButton(
-                                    onClick = { rideToRate = ride },
+                                    onClick = { viewModel.openRatingPrompt(ride, raterRole) },
                                     modifier = Modifier.testTag("rate_ride_${ride.id}")
                                 ) {
-                                    Text(strings.rateDriver)
+                                    Icon(Icons.Default.Star, contentDescription = null)
+                                    Text(if (raterRole == "DRIVER") " ${strings.ratePassenger}" else " ${strings.rateDriver}")
+                                }
+                            } else if (ride.status == RideStatus.COMPLETED.name && isAlreadyRated) {
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    modifier = Modifier.testTag("rated_badge_${ride.id}")
+                                ) {
+                                    Text(
+                                        text = if (givenRating != null) {
+                                            "${strings.alreadyRatedLabel} ★ ${givenRating.stars}"
+                                        } else {
+                                            "★ ${strings.alreadyRatedLabel}"
+                                        },
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                    )
                                 }
                             }
 
@@ -351,43 +490,6 @@ fun RideActivityScreen(
             },
             dismissButton = {
                 TextButton(onClick = { rideToCancel = null }) { Text("Back") }
-            }
-        )
-    }
-
-    rideToRate?.let { target ->
-        AlertDialog(
-            onDismissRequest = { rideToRate = null },
-            title = { Text(strings.rateDriver) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        (1L..5L).forEach { s ->
-                            IconButton(onClick = { ratingStars = s }) {
-                                Icon(
-                                    Icons.Default.Star,
-                                    contentDescription = "$s stars",
-                                    tint = if (s <= ratingStars) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline
-                                )
-                            }
-                        }
-                    }
-                    OutlinedTextField(
-                        value = ratingComment,
-                        onValueChange = { ratingComment = it },
-                        label = { Text("Feedback") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    viewModel.rateTrip(target, target.driverId, "RIDER", ratingStars, ratingComment)
-                    rideToRate = null
-                }) { Text(strings.save) }
-            },
-            dismissButton = {
-                TextButton(onClick = { rideToRate = null }) { Text("Close") }
             }
         )
     }

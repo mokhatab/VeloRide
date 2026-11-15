@@ -46,6 +46,8 @@ import com.example.domain.model.PaymentRecord
 import com.example.domain.model.PricingPolicy
 import com.example.domain.model.Ride
 import com.example.domain.model.UserAccount
+import com.example.ui.components.AdminScaleEngineConsole
+import com.example.ui.main.EngineTelemetrySnapshot
 
 @Composable
 fun AdminDashboardScreen(
@@ -60,7 +62,12 @@ fun AdminDashboardScreen(
     auditLogs: List<AuditLog>,
     pricingPolicies: List<PricingPolicy>,
     operationalConfig: OperationalConfig,
-    adminViewModel: AdminViewModel
+    adminViewModel: AdminViewModel,
+    engineTelemetry: EngineTelemetrySnapshot = EngineTelemetrySnapshot(),
+    onRun5000RiderBenchmark: () -> Unit = {},
+    onRunRaceGuardCheck: () -> Unit = {},
+    onConnectWebSocket: (String) -> Unit = {},
+    onRefreshEngineTelemetry: () -> Unit = {}
 ) {
     val strings = remember(language) { StringsProvider.get(language) }
     var tabIndex by remember { mutableIntStateOf(0) }
@@ -68,7 +75,7 @@ fun AdminDashboardScreen(
 
     Column(modifier = Modifier.fillMaxSize()) {
         ScrollableTabRow(selectedTabIndex = tabIndex, edgePadding = 12.dp) {
-            listOf("Drivers & Docs", "Users & Reports", "Live Rides", "Pricing & Audit", "Finance", "Config").forEachIndexed { i, title ->
+            listOf("Drivers & Docs", "Users & Reports", "Live Rides", "Pricing & Audit", "Finance", "Config", "Scale Engine").forEachIndexed { i, title ->
                 Tab(
                     selected = tabIndex == i,
                     onClick = { tabIndex = i },
@@ -223,9 +230,20 @@ fun AdminDashboardScreen(
                         }
                     }
                 }
-                else -> {
+                5 -> {
                     item {
                         OperationalConfigCard(operationalConfig, adminViewModel)
+                    }
+                }
+                else -> {
+                    item {
+                        AdminScaleEngineConsole(
+                            telemetry = engineTelemetry,
+                            onRun5000RiderBenchmark = onRun5000RiderBenchmark,
+                            onRunRaceGuardCheck = onRunRaceGuardCheck,
+                            onConnectWebSocket = onConnectWebSocket,
+                            onRefresh = onRefreshEngineTelemetry
+                        )
                     }
                 }
             }

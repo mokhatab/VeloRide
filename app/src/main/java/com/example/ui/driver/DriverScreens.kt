@@ -1,8 +1,12 @@
 package com.example.ui.driver
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -24,7 +28,9 @@ import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.MonetizationOn
 import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -49,9 +55,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.core.engine.H3Core
 import com.example.core.i18n.AppLanguage
 import com.example.core.i18n.LocaleFormatter
 import com.example.core.i18n.StringsProvider
@@ -64,11 +72,16 @@ import com.example.domain.model.DriverEarning
 import com.example.domain.model.DriverOnlineStatus
 import com.example.domain.model.DriverPayout
 import com.example.domain.model.DriverProfile
+import com.example.domain.model.PaymentRecord
 import com.example.domain.model.Ride
 import com.example.domain.model.RideOffer
 import com.example.domain.model.RideStatus
+import com.example.domain.model.TripHistoryRole
 import com.example.domain.model.UserAccount
 import com.example.domain.model.VehicleCategory
+import com.example.ui.components.formatAverageRating
+import com.example.ui.history.TripHistoryScreen
+import com.example.ui.main.TripHistoryUiState
 import com.example.ui.main.VeloRideViewModel
 
 @Composable
@@ -80,6 +93,8 @@ fun DriverWorkspaceScreen(
     availability: DriverAvailability?,
     pendingOffers: List<RideOffer>,
     driverRides: List<Ride>,
+    driverHistoryState: TripHistoryUiState = TripHistoryUiState.Loading,
+    payments: List<PaymentRecord> = emptyList(),
     earnings: List<DriverEarning>,
     payouts: List<DriverPayout>,
     nowMs: Long,
@@ -109,6 +124,12 @@ fun DriverWorkspaceScreen(
                 text = { Text(strings.earningsTitle) },
                 modifier = Modifier.testTag("driver_tab_earnings")
             )
+            Tab(
+                selected = selectedTab == 3,
+                onClick = { selectedTab = 3 },
+                text = { Text(strings.tripHistoryTitle) },
+                modifier = Modifier.testTag("driver_tab_history")
+            )
         }
 
         when (selectedTab) {
@@ -130,11 +151,27 @@ fun DriverWorkspaceScreen(
                 documents = documents,
                 viewModel = viewModel
             )
-            else -> DriverEarningsTab(
+            2 -> DriverEarningsTab(
                 language = language,
                 earnings = earnings,
                 payouts = payouts
             )
+            else -> {
+                val ratingsGiven by viewModel.ratingsGiven.collectAsStateWithLifecycle()
+                TripHistoryScreen(
+                    language = language,
+                    initialRole = TripHistoryRole.DRIVER,
+                    showRoleSwitcher = false,
+                    riderHistoryState = driverHistoryState,
+                    driverHistoryState = driverHistoryState,
+                    payments = payments,
+                    ratingsGiven = ratingsGiven,
+                    onRateTrip = { ride, role ->
+                        viewModel.openRatingPrompt(ride, if (role == TripHistoryRole.DRIVER) "DRIVER" else "RIDER")
+                    },
+                    onBack = null
+                )
+            }
         }
     }
 }
@@ -151,7 +188,10 @@ private fun DriverDispatchTab(
     viewModel: VeloRideViewModel,
     onOpenOnboarding: () -> Unit
 ) {
+    val context = LocalContext.current
     val strings = remember(language) { StringsProvider.get(language) }
+    val ratingsGiven by viewModel.ratingsGiven.collectAsStateWithLifecycle()
+    val driverRatingSummary by viewModel.driverRatingSummary.collectAsStateWithLifecycle()
     val isApproved = driverProfile?.approvalStatus == DriverApprovalStatus.APPROVED.name
     val isOnline = availability?.status in listOf(
         DriverOnlineStatus.ONLINE.name,
@@ -160,6 +200,12 @@ private fun DriverDispatchTab(
         DriverOnlineStatus.ARRIVING.name,
         DriverOnlineStatus.ON_TRIP.name
     )
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        // Go online even if permission was denied; in-app 30s alert + chime still runs.
+        viewModel.toggleDriverOnline(true, currentGpsPoint)
+    }
 
     Column(
         modifier = Modifier
@@ -191,16 +237,29 @@ private fun DriverDispatchTab(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = availability?.status ?: DriverOnlineStatus.OFFLINE.name,
+                            text = "${availability?.status ?: DriverOnlineStatus.OFFLINE.name} • ★ ${formatAverageRating(driverRatingSummary.averageRating)} (${driverRatingSummary.ratingCount})",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.testTag("driver_profile_avg_rating")
                         )
                     }
                     Switch(
                         checked = isOnline,
                         enabled = isApproved,
                         onCheckedChange = { checked ->
-                            viewModel.toggleDriverOnline(checked, currentGpsPoint)
+                            if (checked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                val granted = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.POST_NOTIFICATIONS
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (!granted) {
+                                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                } else {
+                                    viewModel.toggleDriverOnline(true, currentGpsPoint)
+                                }
+                            } else {
+                                viewModel.toggleDriverOnline(checked, currentGpsPoint)
+                            }
                         },
                         modifier = Modifier.testTag("driver_online_switch")
                     )
@@ -309,10 +368,15 @@ private fun DriverDispatchTab(
                         color = MaterialTheme.colorScheme.primary
                     )
 
+                    val zoneHex = remember(activeOffer.pickupLat, activeOffer.pickupLng) {
+                        H3Core.cellToString(
+                            H3Core.latLngToCell(activeOffer.pickupLat, activeOffer.pickupLng, H3Core.DEFAULT_RESOLUTION)
+                        )
+                    }
                     Text("${strings.pickupLabel}: ${activeOffer.pickupAddress}", fontWeight = FontWeight.SemiBold)
                     Text("${strings.destinationLabel}: ${activeOffer.destinationAddress}")
                     Text(
-                        text = "Pickup: ${LocaleFormatter.formatDistanceKm(activeOffer.distanceToPickupKm, language)} • Trip: ${LocaleFormatter.formatDistanceKm(activeOffer.estimatedTripDistanceKm, language)} (${activeOffer.estimatedDurationMin} min) • Rider ★ ${activeOffer.riderRatingAvg}",
+                        text = "${strings.zoneAlertLabel}: $zoneHex • Pickup: ${LocaleFormatter.formatDistanceKm(activeOffer.distanceToPickupKm, language)} • Trip: ${LocaleFormatter.formatDistanceKm(activeOffer.estimatedTripDistanceKm, language)} (${activeOffer.estimatedDurationMin} min) • Rider ★ ${activeOffer.riderRatingAvg}",
                         style = MaterialTheme.typography.bodySmall
                     )
 
@@ -407,6 +471,57 @@ private fun DriverDispatchTab(
                                 modifier = Modifier.fillMaxWidth().height(50.dp).testTag("driver_complete_trip_button")
                             ) { Text(strings.completeTrip) }
                         }
+                    }
+                }
+            }
+        }
+
+        // Prompt Driver to rate recently completed unrated passenger trip
+        val unratedCompletedTrip = driverRides.firstOrNull { ride ->
+            ride.status == RideStatus.COMPLETED.name &&
+                !ride.driverRated &&
+                ride.riderId.isNotBlank() &&
+                ratingsGiven.none { it.rideId == ride.id && it.fromRole.equals("DRIVER", ignoreCase = true) }
+        }
+        if (unratedCompletedTrip != null) {
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("driver_rate_rider_card")
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Star,
+                            contentDescription = strings.ratePassenger,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = strings.ratePassenger,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Text(
+                        text = "${unratedCompletedTrip.riderName.ifBlank { "Passenger" }} • ${unratedCompletedTrip.pickupAddress} → ${unratedCompletedTrip.destinationAddress}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Button(
+                        onClick = { viewModel.openRatingPrompt(unratedCompletedTrip, "DRIVER") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("driver_rate_passenger_button")
+                    ) {
+                        Text(strings.ratePassenger, fontWeight = FontWeight.Bold)
                     }
                 }
             }

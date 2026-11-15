@@ -1,8 +1,12 @@
 package com.example.domain.payment
 
 import com.example.BuildConfig
+import com.example.domain.model.PaymentMethodRecord
 import com.example.domain.model.PaymentStatus
-import com.squareup.moshi.JsonClass
+import com.example.domain.model.RiderPaymentChoice
+import com.example.domain.model.StripeAutoConfig
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -26,7 +30,8 @@ data class PaymentIntentRequest(
     val amountMinor: Long,
     val currencyCode: String,
     val paymentMethodId: String?,
-    val idempotencyKey: String
+    val idempotencyKey: String,
+    val paymentMethodType: String = "CARD"
 )
 
 data class PaymentIntentResult(
@@ -36,16 +41,15 @@ data class PaymentIntentResult(
     val failureReason: String?
 )
 
-@JsonClass(generateAdapter = true)
 data class BackendPaymentIntentBody(
     val rideId: String,
     val riderId: String,
     val amountMinor: Long,
     val currency: String,
-    val paymentMethodId: String?
+    val paymentMethodId: String?,
+    val paymentMethodType: String = "CARD"
 )
 
-@JsonClass(generateAdapter = true)
 data class BackendPaymentIntentResponse(
     val paymentIntentId: String = "",
     val clientSecret: String = "",
@@ -53,14 +57,12 @@ data class BackendPaymentIntentResponse(
     val failureReason: String? = null
 )
 
-@JsonClass(generateAdapter = true)
 data class BackendRefundBody(
     val paymentIntentId: String,
     val amountMinor: Long,
     val reason: String
 )
 
-@JsonClass(generateAdapter = true)
 data class BackendRefundResponse(
     val refundId: String = "",
     val status: String = "FAILED",
@@ -84,6 +86,12 @@ interface StripeBackendApi {
 interface PaymentGateway {
     fun configurationStatus(): StripeConfigurationStatus
     fun validateCurrencySupport(currencyCode: String, decimals: Int): Boolean
+    fun configureForRiderChoice(
+        choice: RiderPaymentChoice,
+        currencyCode: String,
+        decimals: Int,
+        linkedMethods: List<PaymentMethodRecord>
+    ): StripeAutoConfig
     suspend fun createAndAuthorizePayment(request: PaymentIntentRequest): PaymentIntentResult
     suspend fun requestRefund(
         paymentIntentId: String,
@@ -97,6 +105,10 @@ class StripePaymentGateway(
     private val backendUrl: String = BuildConfig.STRIPE_BACKEND_URL,
     private val publishableKey: String = BuildConfig.STRIPE_PUBLISHABLE_KEY
 ) : PaymentGateway {
+
+    private val moshi: Moshi by lazy {
+        Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
+    }
 
     private val supportedCurrencies = mapOf(
         "EGP" to 2,
@@ -129,6 +141,68 @@ class StripePaymentGateway(
         return expectedDecimals == decimals
     }
 
+    override fun configureForRiderChoice(
+        choice: RiderPaymentChoice,
+        currencyCode: String,
+        decimals: Int,
+        linkedMethods: List<PaymentMethodRecord>
+    ): StripeAutoConfig {
+        val currencyOk = validateCurrencySupport(currencyCode, decimals)
+        val gwStatus = configurationStatus()
+
+        return when (choice) {
+            RiderPaymentChoice.CASH -> StripeAutoConfig(
+                selectedChoice = RiderPaymentChoice.CASH,
+                paymentMethodType = "CASH",
+                resolvedTokenId = "CASH",
+                stripeAutoConfigured = false,
+                stripeGatewayLive = gwStatus.isConfigured,
+                currencySupported = currencyOk,
+                summaryMessage = "Cash settlement selected — pay driver at drop-off (Stripe bypassed)"
+            )
+            RiderPaymentChoice.E_WALLET -> {
+                val walletPm = linkedMethods.firstOrNull {
+                    it.methodType.equals("WALLET", ignoreCase = true)
+                }
+                val token = walletPm?.stripePaymentMethodId ?: "pm_wallet_stripe_auto"
+                val msg = if (gwStatus.isConfigured) {
+                    "Stripe E-Wallet auto-configured ($token) • Auto-charges on trip completion"
+                } else {
+                    "E-Wallet Stripe mode prepared ($token) • Add Stripe Secrets for live settlement"
+                }
+                StripeAutoConfig(
+                    selectedChoice = RiderPaymentChoice.E_WALLET,
+                    paymentMethodType = "E_WALLET",
+                    resolvedTokenId = "E_WALLET:$token",
+                    stripeAutoConfigured = currencyOk,
+                    stripeGatewayLive = gwStatus.isConfigured,
+                    currencySupported = currencyOk,
+                    summaryMessage = msg
+                )
+            }
+            RiderPaymentChoice.CARD -> {
+                val cardPm = linkedMethods.firstOrNull {
+                    it.methodType.equals("CARD", ignoreCase = true) && it.isDefault
+                } ?: linkedMethods.firstOrNull { it.methodType.equals("CARD", ignoreCase = true) }
+                val token = cardPm?.stripePaymentMethodId ?: "pm_card_stripe_default"
+                val msg = if (gwStatus.isConfigured) {
+                    "Stripe Card auto-configured (${cardPm?.brand ?: "Card"} ••${cardPm?.last4 ?: "4242"})"
+                } else {
+                    "Stripe Card mode prepared • Add Stripe Secrets for live charge"
+                }
+                StripeAutoConfig(
+                    selectedChoice = RiderPaymentChoice.CARD,
+                    paymentMethodType = "CARD",
+                    resolvedTokenId = "CARD:$token",
+                    stripeAutoConfigured = currencyOk,
+                    stripeGatewayLive = gwStatus.isConfigured,
+                    currencySupported = currencyOk,
+                    summaryMessage = msg
+                )
+            }
+        }
+    }
+
     override suspend fun createAndAuthorizePayment(request: PaymentIntentRequest): PaymentIntentResult =
         withContext(Dispatchers.IO) {
             val status = configurationStatus()
@@ -157,7 +231,8 @@ class StripePaymentGateway(
                         riderId = request.riderId,
                         amountMinor = request.amountMinor,
                         currency = request.currencyCode.lowercase(),
-                        paymentMethodId = request.paymentMethodId
+                        paymentMethodId = request.paymentMethodId,
+                        paymentMethodType = request.paymentMethodType
                     )
                 )
                 val mappedStatus = PaymentStatus.entries.firstOrNull {
@@ -216,7 +291,7 @@ class StripePaymentGateway(
         return Retrofit.Builder()
             .baseUrl(normalizedBase)
             .client(client)
-            .addConverterFactory(MoshiConverterFactory.create())
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
             .create(StripeBackendApi::class.java)
     }

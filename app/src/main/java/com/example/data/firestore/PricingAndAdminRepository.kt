@@ -161,7 +161,9 @@ class PricingAndAdminRepository(
     }
 
     /**
-     * Initiates a ride payment using StripePaymentGateway.
+     * Initiates a ride payment based on the rider's selected settlement mode:
+     * - CASH: records a clean cash-handoff ledger entry without calling Stripe API.
+     * - E_WALLET / CARD: initiates a Stripe PaymentIntent via PaymentGateway.
      * Never fakes a SUCCEEDED payment when Stripe backend is not configured.
      */
     suspend fun initiateRidePayment(
@@ -184,16 +186,31 @@ class PricingAndAdminRepository(
                 }
             }
 
-            val gatewayResult = paymentGateway.createAndAuthorizePayment(
-                PaymentIntentRequest(
-                    rideId = ride.id,
-                    riderId = uid,
-                    amountMinor = amountMinor,
-                    currencyCode = ride.currencyCode,
-                    paymentMethodId = paymentMethodId,
-                    idempotencyKey = idempotencyKey
+            val isCashMode = paymentMethodType.equals("CASH", ignoreCase = true) ||
+                paymentMethodId.equals("CASH", ignoreCase = true) ||
+                ride.paymentMethodId.equals("CASH", ignoreCase = true)
+
+            val resolvedMethodType = if (isCashMode) "CASH" else paymentMethodType.ifBlank { "CARD" }
+            val gatewayResult = if (isCashMode) {
+                com.example.domain.payment.PaymentIntentResult(
+                    status = PaymentStatus.PENDING,
+                    stripePaymentIntentId = "",
+                    clientSecret = null,
+                    failureReason = "Cash payment selected — pay driver directly at drop-off"
                 )
-            )
+            } else {
+                paymentGateway.createAndAuthorizePayment(
+                    PaymentIntentRequest(
+                        rideId = ride.id,
+                        riderId = uid,
+                        amountMinor = amountMinor,
+                        currencyCode = ride.currencyCode,
+                        paymentMethodId = paymentMethodId,
+                        idempotencyKey = idempotencyKey,
+                        paymentMethodType = resolvedMethodType
+                    )
+                )
+            }
 
             // Client rules permit creating PENDING, REQUIRES_ACTION, or FAILED only.
             // Verified SUCCEEDED confirmations arrive via server webhook / admin reconciliation.
@@ -208,7 +225,7 @@ class PricingAndAdminRepository(
                 originalCurrency = ride.currencyCode,
                 settlementCurrency = ride.currencyCode,
                 rate = 1.0,
-                source = "local_settlement"
+                source = if (isCashMode) "cash_handoff" else "local_settlement"
             )
 
             val receiptNumber = "VR-${ride.countryCode}-${ride.id.takeLast(6).uppercase()}"
@@ -218,7 +235,7 @@ class PricingAndAdminRepository(
                 "driverId" to ride.driverId,
                 "idempotencyKey" to idempotencyKey,
                 "stripePaymentIntentId" to gatewayResult.stripePaymentIntentId,
-                "paymentMethodType" to paymentMethodType,
+                "paymentMethodType" to resolvedMethodType,
                 "currencyCode" to ride.currencyCode,
                 "currencyDecimals" to ride.currencyDecimals,
                 "amountMinor" to amountMinor,
@@ -248,7 +265,7 @@ class PricingAndAdminRepository(
                     "paymentId" to paymentId,
                     "rideId" to ride.id,
                     "riderId" to uid,
-                    "eventType" to "PAYMENT_INITIATED",
+                    "eventType" to if (isCashMode) "CASH_SETTLEMENT_SELECTED" else "PAYMENT_INITIATED",
                     "amountMinor" to amountMinor,
                     "currencyCode" to ride.currencyCode,
                     "stripeEventId" to gatewayResult.stripePaymentIntentId,
@@ -260,7 +277,12 @@ class PricingAndAdminRepository(
 
             val saved = paymentRef.get().await()
                 .toObject(PaymentRecord::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                ?: PaymentRecord(id = paymentId, status = persistedStatus, failureReason = gatewayResult.failureReason)
+                ?: PaymentRecord(
+                    id = paymentId,
+                    paymentMethodType = resolvedMethodType,
+                    status = persistedStatus,
+                    failureReason = gatewayResult.failureReason
+                )
             Result.success(saved)
         } catch (e: CancellationException) {
             throw e

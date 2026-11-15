@@ -2,13 +2,19 @@ package com.example.domain
 
 import com.example.core.i18n.AppLanguage
 import com.example.core.i18n.LocaleFormatter
+import com.example.core.network.LocationUpdatePacket
+import com.example.domain.mapping.OsrmRouteResponse
+import com.example.domain.model.PaymentMethodRecord
 import com.example.domain.model.PaymentStatus
+import com.example.domain.model.RiderPaymentChoice
 import com.example.domain.model.VehicleCategory
 import com.example.domain.payment.PaymentIntentRequest
 import com.example.domain.payment.StripePaymentGateway
 import com.example.domain.pricing.FareCalculationInput
 import com.example.domain.pricing.MarketCatalog
 import com.example.domain.pricing.PricingEngine
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -155,5 +161,73 @@ class PricingAndPaymentUnitTest {
         val p99 = latenciesUs[989]
         println("PricingEngine 1000-run latency (us): p50=$p50, p95=$p95, p99=$p99")
         assertTrue("Expected p99 pricing latency under 50ms, was $p99 us", p99 < 50_000.0)
+    }
+
+    @Test
+    fun stripeAutoConfig_cashBypassesStripe_ewalletAutoConfiguresStripeToken() {
+        val gateway = StripePaymentGateway(backendUrl = "", publishableKey = "")
+        val cashCfg = gateway.configureForRiderChoice(
+            choice = RiderPaymentChoice.CASH,
+            currencyCode = "EGP",
+            decimals = 2,
+            linkedMethods = emptyList()
+        )
+        assertFalse(cashCfg.stripeAutoConfigured)
+        assertEquals("CASH", cashCfg.paymentMethodType)
+        assertEquals("CASH", cashCfg.resolvedTokenId)
+        assertEquals(RiderPaymentChoice.CASH, RiderPaymentChoice.fromRidePaymentMethodId(cashCfg.resolvedTokenId))
+
+        // E-Wallet without saved cards automatically binds a Stripe E-Wallet token
+        val walletAutoCfg = gateway.configureForRiderChoice(
+            choice = RiderPaymentChoice.E_WALLET,
+            currencyCode = "EGP",
+            decimals = 2,
+            linkedMethods = emptyList()
+        )
+        assertTrue(walletAutoCfg.stripeAutoConfigured)
+        assertEquals("E_WALLET", walletAutoCfg.paymentMethodType)
+        assertTrue(walletAutoCfg.resolvedTokenId.startsWith("E_WALLET:"))
+        assertEquals(RiderPaymentChoice.E_WALLET, RiderPaymentChoice.fromRidePaymentMethodId(walletAutoCfg.resolvedTokenId))
+
+        // E-Wallet with saved tokenized WALLET method uses its stripe token
+        val linkedWallet = PaymentMethodRecord(
+            id = "pm_1",
+            userId = "u1",
+            methodType = "WALLET",
+            stripePaymentMethodId = "pm_wallet_tok_99"
+        )
+        val walletSavedCfg = gateway.configureForRiderChoice(
+            choice = RiderPaymentChoice.E_WALLET,
+            currencyCode = "USD",
+            decimals = 2,
+            linkedMethods = listOf(linkedWallet)
+        )
+        assertTrue(walletSavedCfg.resolvedTokenId.contains("pm_wallet_tok_99"))
+        assertEquals(RiderPaymentChoice.E_WALLET, RiderPaymentChoice.fromRidePaymentMethodId(walletSavedCfg.resolvedTokenId))
+    }
+
+    @Test
+    fun moshiReflectionAdapters_roundTripWithoutKspCodegen() {
+        val moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
+        val packetAdapter = moshi.adapter(LocationUpdatePacket::class.java)
+        val packet = LocationUpdatePacket(
+            entityId = "drv_1",
+            role = "DRIVER",
+            rideId = "ride_99",
+            latitude = 30.0444,
+            longitude = 31.2357,
+            h3CellHex = "883e612345fffff",
+            timestampMs = 1_700_000_000_000L
+        )
+        val json = packetAdapter.toJson(packet)
+        val decoded = packetAdapter.fromJson(json)
+        assertEquals(packet, decoded)
+
+        val osrmAdapter = moshi.adapter(OsrmRouteResponse::class.java)
+        val osrmJson = """{"code":"Ok","routes":[{"distance":12500.0,"duration":900.0,"geometry":{"coordinates":[[31.2357,30.0444],[31.3999,30.1128]]}}]}"""
+        val osrmDecoded = osrmAdapter.fromJson(osrmJson)
+        assertEquals("Ok", osrmDecoded?.code)
+        assertEquals(1, osrmDecoded?.routes?.size)
+        assertEquals(12500.0, osrmDecoded?.routes?.first()?.distance ?: 0.0, 0.1)
     }
 }

@@ -9,6 +9,32 @@ enum class PaymentStatus {
     PENDING, REQUIRES_ACTION, AUTHORIZED, SUCCEEDED, FAILED, CANCELLED, REFUNDED, PARTIALLY_REFUNDED
 }
 
+enum class RiderPaymentChoice(val persistedType: String, val usesStripe: Boolean) {
+    CASH(persistedType = "CASH", usesStripe = false),
+    E_WALLET(persistedType = "E_WALLET", usesStripe = true),
+    CARD(persistedType = "CARD", usesStripe = true);
+
+    companion object {
+        fun fromRidePaymentMethodId(raw: String?): RiderPaymentChoice = when {
+            raw.equals("CASH", ignoreCase = true) -> CASH
+            raw != null && raw.startsWith("E_WALLET", ignoreCase = true) -> E_WALLET
+            raw != null && raw.startsWith("WALLET", ignoreCase = true) -> E_WALLET
+            raw != null && raw.isNotBlank() -> CARD
+            else -> E_WALLET
+        }
+    }
+}
+
+data class StripeAutoConfig(
+    val selectedChoice: RiderPaymentChoice = RiderPaymentChoice.E_WALLET,
+    val paymentMethodType: String = "E_WALLET",
+    val resolvedTokenId: String = "pm_wallet_stripe_auto",
+    val stripeAutoConfigured: Boolean = true,
+    val stripeGatewayLive: Boolean = false,
+    val currencySupported: Boolean = true,
+    val summaryMessage: String = ""
+)
+
 enum class PayoutStatus {
     PENDING, ELIGIBLE, PAID_MANUAL, PAID_STRIPE, HELD
 }
