@@ -1,0 +1,1284 @@
+# PROJECT: VELORIDE
+## Complete Ride-Hailing Platform – Development & Production Implementation
+
+### 1. PROJECT OBJECTIVE
+
+Act as a Senior Software Architect, Full-Stack Engineer, UI/UX Designer, Database Engineer, and QA Automation Engineer.
+
+Your task is to develop and enhance **VeloRide**, an Uber-style ride-hailing application that connects riders with registered drivers.
+
+The objective is to deliver a fully functional, secure, scalable, multilingual, and production-ready platform supporting:
+
+- Rider and Driver registration.
+- Dual account roles with account switching.
+- Real-time driver location tracking.
+- Nearby driver discovery and automated dispatch.
+- A 30-second driver acceptance process.
+- Dynamic country- and city-based fare calculation.
+- Automatic local currency detection.
+- Online payments through Stripe.
+- Ride lifecycle management.
+- Administrative controls and operational monitoring.
+- Responsive mobile and desktop interfaces.
+
+**IMPORTANT:** Enhance the existing VeloRide application. Do not rebuild it from scratch, remove working features, or replace its current technology stack unnecessarily.
+
+First inspect the existing application, database, APIs, authentication, integrations, and hosting environment. Identify existing functionality and gaps before implementing changes.
+
+---
+
+# 2. SOFTWARE ARCHITECTURE
+
+Implement clean, maintainable, modular architecture.
+
+Apply:
+
+- Clean Architecture.
+- Domain-Driven Design where appropriate.
+- SOLID principles.
+- Separation of business logic from infrastructure.
+- API-based communication.
+- Event-driven processing where supported.
+- Secure role-based authorization.
+- Reusable components and services.
+
+### Architecture principles
+
+1. Business rules must not depend directly on UI components.
+2. Pricing calculations must be independent of payment providers.
+3. Dispatch logic must be independent of notification providers.
+4. External services must be accessed through defined interfaces.
+5. Database access must be isolated in repositories or equivalent data-access services.
+6. Business operations must be testable independently.
+7. All critical operations must validate permissions on the server.
+
+Use the current hosting platform's supported capabilities.
+
+Do not introduce infrastructure that cannot be deployed or maintained in the current environment. Do not assume that dedicated Kafka, Redis, PostgreSQL, H3, or self-hosted WebSocket services are available.
+
+Where a required capability is unsupported, implement the best compatible alternative and clearly document the limitation.
+
+---
+
+# 3. USER REGISTRATION AND ACCOUNT MANAGEMENT
+
+Implement two registration options on the first registration screen.
+
+### Registration choices
+
+- Register as Rider.
+- Register as Driver.
+
+Both roles must use one unified user identity.
+
+A user must be able to maintain both Rider and Driver profiles without creating duplicate accounts.
+
+### A. Rider registration
+
+Required fields:
+
+- Full name.
+- Mobile number.
+- Email address.
+- Password or supported authentication method.
+- Profile picture (optional).
+- Country.
+- Preferred language.
+
+Requirements:
+
+- Phone/email verification.
+- Secure authentication.
+- Password recovery.
+- Profile editing.
+- Location permission management.
+- Ride history.
+- Saved pickup locations.
+- Payment methods.
+- Ratings and reviews.
+
+### B. Driver registration
+
+Required information:
+
+**Personal information**
+- Full name.
+- Mobile number.
+- Email.
+- National ID or equivalent identification.
+- Driving licence information.
+- Profile picture.
+
+**Vehicle information**
+- Vehicle make and model.
+- Model year.
+- Vehicle category.
+- Vehicle colour.
+- Registration number.
+- Plate number.
+- Vehicle photographs.
+
+**Documents**
+- Driving licence.
+- Vehicle registration.
+- Identification documents.
+- Additional documents required by the operating country.
+
+### Driver approval workflow
+
+Driver registration must not automatically activate driving privileges.
+
+Driver status:
+
+1. REGISTERED.
+2. DOCUMENTS_PENDING.
+3. UNDER_REVIEW.
+4. APPROVED.
+5. REJECTED.
+6. SUSPENDED.
+
+Only approved drivers can:
+
+- Go online.
+- Receive ride offers.
+- Accept rides.
+- Start trips.
+
+Administrators must be able to review documents and approve, reject, or suspend drivers.
+
+---
+
+# 4. SWITCHING BETWEEN RIDER AND DRIVER
+
+Add an account-switching option under:
+
+Profile → Account Settings → Switch Account Type.
+
+### Rider to Driver
+
+- Start driver onboarding.
+- Complete missing driver information.
+- Upload required documents.
+- Submit for verification.
+- Activate Driver mode only after approval.
+
+### Driver to Rider
+
+- Driver must first go offline.
+- Driver cannot switch during an active trip.
+- Stop receiving ride offers.
+- Preserve driver profile, documents, ratings, and trip history.
+- Enable Rider mode.
+
+### Switching rules
+
+- One user identity with separate Rider and Driver profiles.
+- No duplicate accounts.
+- Role permissions must be enforced by the backend.
+- Preserve all account history.
+- Do not allow unauthorized role escalation.
+- Provide a clear indication of the currently active account mode.
+
+---
+
+# 5. DRIVER AVAILABILITY AND LOCATION TRACKING
+
+Create a real-time driver availability system.
+
+Driver statuses:
+
+- OFFLINE.
+- ONLINE.
+- OFFER_RECEIVED.
+- ACCEPTED.
+- ARRIVING.
+- ON_TRIP.
+- TEMPORARILY_UNAVAILABLE.
+
+### GPS tracking
+
+When a driver is online:
+
+- Request location permission.
+- Capture GPS coordinates.
+- Update driver location periodically.
+- Display available drivers on the dispatch map.
+- Update rider-facing driver location during an assigned trip.
+- Track location timestamps.
+- Reject invalid or outdated location updates.
+- Handle temporary network disconnections.
+
+Only use sufficiently recent GPS positions when selecting nearby drivers.
+
+The system must not overwrite newer GPS positions with delayed older updates.
+
+### Location privacy
+
+- Riders must not access unrelated riders' pickup locations.
+- Drivers must only receive information necessary for their assigned offers and trips.
+- Location information must be restricted by role and authorization.
+- Historical location data must have controlled access.
+
+---
+
+# 6. AUTOMATED NEARBY DRIVER DISPATCH
+
+When a rider requests a ride, automatically locate and notify eligible nearby drivers.
+
+### Driver eligibility
+
+Only select drivers who:
+
+- Are approved.
+- Are online.
+- Have valid vehicle information.
+- Match the requested vehicle category.
+- Have recent GPS coordinates.
+- Are not already assigned to an active trip.
+- Are not suspended or otherwise restricted.
+
+### Driver matching
+
+Use available spatial search capabilities.
+
+Prioritize:
+
+1. Estimated road distance to pickup.
+2. Estimated arrival time.
+3. Driver availability.
+4. Vehicle category compatibility.
+5. Location freshness.
+
+Use actual road routing and ETA when supported, rather than relying exclusively on straight-line GPS distance.
+
+### Search radius
+
+Make dispatch radius configurable by:
+
+- Country.
+- City.
+- Vehicle category.
+- Service type.
+
+If no driver accepts the request, automatically expand the search radius.
+
+---
+
+# 7. DRIVER RIDE ALERT – SPECIAL SOUND AND 30-SECOND ACCEPTANCE
+
+This is a critical feature.
+
+When a rider confirms a ride request, the system must immediately initiate the driver notification process.
+
+### A. Driver notification
+
+Deliver a dedicated ride-request notification to eligible nearby drivers.
+
+The notification must include:
+
+- Distinctive ride-request sound.
+- Vibration where supported.
+- High-priority notification.
+- Pickup location.
+- Destination summary.
+- Distance to pickup.
+- Estimated trip distance.
+- Estimated fare.
+- Vehicle category.
+- Customer rating, where available.
+
+Prevent repeated notifications and overlapping alert sounds for the same offer.
+
+### Notification delivery
+
+Support:
+
+- WebSocket or equivalent real-time communication while the application is active.
+- Push notifications when supported in the background.
+- Android and iOS notification channels where applicable.
+- Browser/PWA notifications where supported.
+
+Clearly handle browser and operating-system restrictions affecting background alerts or sound playback.
+
+### B. Driver acceptance screen
+
+Display a prominent ride-offer card containing:
+
+- Pickup location.
+- Destination.
+- Pickup distance.
+- Estimated trip duration.
+- Estimated fare.
+- Vehicle type.
+- Customer rating.
+- Countdown timer.
+
+Provide two buttons:
+
+**ACCEPT RIDE**
+
+**REJECT RIDE**
+
+### C. Thirty-second acceptance deadline
+
+Every driver offer must have a strict 30-second acceptance period.
+
+Rules:
+
+- Start the timer when the offer is issued by the backend.
+- Use server timestamps, not the driver's device clock.
+- Automatically expire the offer after 30 seconds.
+- Remove expired offers from active driver screens.
+- Prevent acceptance after expiration.
+- Inform the driver when another driver has accepted the ride.
+
+### D. Atomic ride assignment
+
+The first valid driver acceptance wins.
+
+The backend must guarantee:
+
+- One ride can have only one assigned driver.
+- One driver cannot accept multiple conflicting active rides.
+- Simultaneous acceptance attempts cannot create duplicate assignments.
+- Competing offers are invalidated after a successful assignment.
+
+Use a database transaction and conditional state transitions.
+
+Example conditional offer update:
+
+```sql
+UPDATE ride_offers
+SET status = 'ACCEPTED'
+WHERE ride_id = :ride_id
+AND driver_id = :driver_id
+AND status = 'PENDING'
+AND expires_at > CURRENT_TIMESTAMP;
+```
+
+The offer update, ride assignment, and driver availability update must be performed atomically.
+
+Use appropriate database constraints and locking mechanisms where supported.
+
+Redis locks alone must not be treated as the authoritative assignment mechanism.
+
+### E. Automatic dispatch escalation
+
+Implement three configurable dispatch rounds:
+
+| Round | Driver Search |
+|---|---|
+| 1 | Nearest eligible drivers – 30 seconds |
+| 2 | Expanded search radius – 30 seconds |
+| 3 | Maximum configured radius – 30 seconds |
+
+Do not repeatedly send the same ride offer to drivers who already rejected or expired it.
+
+If nobody accepts:
+
+- Set ride status to NO_DRIVER_AVAILABLE.
+- Inform the rider.
+- Provide a retry option.
+- Record the dispatch failure for analytics.
+
+### F. Connection failure handling
+
+- Expire offers according to server time.
+- Do not rely on notification acknowledgement as proof of acceptance.
+- Handle temporary WebSocket disconnections.
+- Keep ride assignment state authoritative on the server.
+- Prevent duplicate offers and duplicate assignments.
+
+---
+
+# 8. RIDE MANAGEMENT AND LIFECYCLE
+
+Implement the complete ride lifecycle.
+
+### Rider journey
+
+1. Open application.
+2. Select pickup location.
+3. Select destination.
+4. Choose vehicle category.
+5. View fare estimate.
+6. Confirm ride request.
+7. Wait for driver acceptance.
+8. Receive assigned driver information.
+9. Track driver arrival.
+10. Receive arrival notification.
+11. Start trip.
+12. Track trip progress.
+13. Complete trip.
+14. Pay.
+15. Rate driver.
+
+### Driver journey
+
+1. Sign in.
+2. Go online.
+3. Share current location.
+4. Receive ride offer.
+5. Accept or reject.
+6. Navigate to pickup.
+7. Mark ARRIVED.
+8. Start trip after passenger confirmation or applicable verification.
+9. Complete trip.
+10. Review trip earnings.
+11. Return to available status.
+
+### Ride statuses
+
+- REQUESTED.
+- SEARCHING_FOR_DRIVER.
+- OFFERED.
+- ACCEPTED.
+- DRIVER_ARRIVING.
+- ARRIVED.
+- IN_PROGRESS.
+- COMPLETED.
+- CANCELLED.
+- NO_DRIVER_AVAILABLE.
+- EXPIRED.
+
+Implement valid state transitions and prevent unauthorized status changes.
+
+### Cancellation
+
+Allow cancellation according to configurable business rules.
+
+Record:
+
+- Cancellation initiator.
+- Cancellation reason.
+- Timestamp.
+- Applicable cancellation fee.
+- Refund or payment adjustment.
+
+---
+
+# 9. DYNAMIC COUNTRY AND CITY FARE CALCULATION
+
+Implement an international pricing engine.
+
+The system must automatically identify the operating country and city using the pickup GPS location.
+
+Do not use IP address, phone language, or payment-card country as the primary location for fare selection.
+
+### A. Automatic location and currency detection
+
+Use reverse geocoding or an equivalent location service to identify:
+
+- Country.
+- Country ISO code.
+- City.
+- Operating area.
+- Local currency.
+
+Automatically select the appropriate currency.
+
+Examples:
+
+| Country | Currency | Code |
+|---|---|---|
+| Egypt | Egyptian Pound | EGP |
+| Saudi Arabia | Saudi Riyal | SAR |
+| UAE | UAE Dirham | AED |
+| United Kingdom | Pound Sterling | GBP |
+| United States | US Dollar | USD |
+| Germany | Euro | EUR |
+
+The system must support additional countries without requiring changes to core pricing logic.
+
+### B. Configurable pricing profiles
+
+Create a country/city pricing configuration containing:
+
+- Country code.
+- Country name.
+- City.
+- Currency code.
+- Currency symbol.
+- Currency decimal places.
+- Service category.
+- Base fare.
+- Included distance.
+- Price per kilometre.
+- Waiting charge.
+- Minimum fare.
+- Booking fee.
+- Tax percentage.
+- Airport surcharge.
+- Night surcharge.
+- Traffic surcharge.
+- Surge multiplier.
+- Effective start date.
+- Effective end date.
+- Pricing version.
+- Active/inactive status.
+
+### C. Egypt initial pricing configuration
+
+Configure Egypt as the initial operating market.
+
+Use the following requested commercial pricing ranges as administrator-configurable starting values:
+
+| Pricing Component | Configuration Range |
+|---|---:|
+| Base fare | EGP 8.50–20.00 |
+| Included distance | First 1 km |
+| Additional kilometre | EGP 4.00–10.00 |
+| Waiting charge | Configurable by city/district |
+
+These are configurable commercial starting ranges, not automatically verified official tariffs.
+
+Maintain a separate reference profile for applicable local taxi tariffs. Do not automatically assume that public taxi-meter tariffs govern VeloRide's private ride-hailing prices.
+
+Administrators must be able to update pricing when local regulations or commercial requirements change.
+
+### D. Fare calculation
+
+Use actual road-route distance and applicable waiting time.
+
+Implement:
+
+```text
+Billable Distance =
+MAX(0, Actual Route Distance - Included Distance)
+
+Distance Charge =
+Billable Distance × Price Per KM
+
+Subtotal =
+Base Fare
++ Distance Charge
++ Waiting Charge
++ Booking Fee
++ Applicable Surcharges
+
+Fare Before Discounts =
+Subtotal × Applicable Pricing Multipliers
+
+Final Fare =
+Fare Before Discounts
++ Applicable Taxes
+- Discounts
+```
+
+Apply the configured minimum fare.
+
+Do not calculate commercial trip distance using straight-line GPS distance when road-routing data is available.
+
+### E. Fare estimate response
+
+Every fare estimate must return:
+
+- Country.
+- City.
+- Currency.
+- Currency symbol.
+- Pickup location.
+- Destination.
+- Estimated distance.
+- Estimated duration.
+- Base fare.
+- Distance charge.
+- Waiting charge.
+- Surcharges.
+- Taxes.
+- Discounts.
+- Final estimated fare.
+- Pricing version.
+- Quote creation timestamp.
+- Quote expiry timestamp.
+
+### F. Pricing consistency
+
+- Save the applicable pricing version when a ride is accepted.
+- Do not silently change an accepted fare when an administrator updates pricing.
+- Recalculate final trip charges using actual billable distance and waiting time according to the agreed fare policy.
+- Record fare adjustments transparently.
+- Use appropriate decimal precision and integer minor units for payment processing.
+- Never use floating-point arithmetic for financial calculations.
+
+### G. Currency conversion
+
+If platform reporting or settlement uses a different currency:
+
+- Keep the original trip currency.
+- Store the conversion rate.
+- Store the conversion timestamp.
+- Store the conversion source/version.
+- Keep original and converted amounts separately.
+
+Do not silently convert the rider's local fare into another currency.
+
+---
+
+# 10. STRIPE PAYMENT INTEGRATION
+
+Integrate Stripe for secure payment processing.
+
+Do not display payment as active until the Stripe integration has been correctly configured and tested.
+
+### Payment methods
+
+Support applicable Stripe payment methods based on country availability:
+
+- Credit cards.
+- Debit cards.
+- Supported digital wallets.
+- Other enabled local payment methods.
+
+### Payment workflow
+
+1. Rider confirms ride.
+2. System creates the appropriate payment record.
+3. Apply the selected payment method.
+4. Calculate the final fare.
+5. Process payment through Stripe.
+6. Confirm payment using verified server-side payment events.
+7. Update ride payment status.
+8. Generate receipt.
+9. Update financial reporting.
+
+### Payment requirements
+
+Implement:
+
+- Secure Stripe integration.
+- Server-side payment creation.
+- Payment authorization/capture where applicable.
+- Webhook signature validation.
+- Idempotency keys.
+- Duplicate payment prevention.
+- Refund processing.
+- Failed payment handling.
+- Payment reconciliation.
+- Immutable transaction records.
+
+Never trust a frontend success message as proof of payment.
+
+Never store raw card numbers or CVV data in the VeloRide database.
+
+### Currency handling
+
+- Charge in the correct supported currency.
+- Respect Stripe currency minor-unit requirements.
+- Validate currency compatibility before payment creation.
+- Never assume every currency or payment method is supported in every country.
+
+### Payment statuses
+
+- PENDING.
+- REQUIRES_ACTION.
+- AUTHORIZED.
+- SUCCEEDED.
+- FAILED.
+- CANCELLED.
+- REFUNDED.
+- PARTIALLY_REFUNDED.
+
+### Driver earnings and payouts
+
+Create a driver earnings ledger recording:
+
+- Gross ride fare.
+- Platform commission.
+- Applicable taxes.
+- Adjustments.
+- Refunds.
+- Net driver earnings.
+- Payout status.
+- Payout reference.
+- Payout date.
+
+Keep driver earnings separate from customer payment transactions.
+
+If automated Stripe Connect payouts are supported and configured, implement them using the appropriate country-specific onboarding and compliance requirements.
+
+Otherwise, maintain an auditable payout ledger and clearly identify manual payout operations.
+
+---
+
+# 11. MAPS, ROUTING AND NAVIGATION
+
+Integrate a supported mapping and routing provider.
+
+Required capabilities:
+
+- Pickup location selection.
+- Destination search.
+- Map pin selection.
+- Current GPS location.
+- Reverse geocoding.
+- Route calculation.
+- Distance calculation.
+- Estimated arrival time.
+- Driver navigation.
+- Live driver marker.
+- Live trip tracking.
+
+Create provider-independent interfaces so the mapping provider can be replaced without rewriting business logic.
+
+Validate coordinates and handle unavailable routing services gracefully.
+
+---
+
+# 12. NOTIFICATION SYSTEM
+
+Implement a centralized notification service.
+
+Notification events:
+
+- Registration confirmation.
+- Phone/email verification.
+- Driver approval/rejection.
+- Driver ride offer.
+- Offer expiration.
+- Driver acceptance.
+- Driver arrival.
+- Trip started.
+- Trip completed.
+- Ride cancellation.
+- Payment success/failure.
+- Receipt generation.
+- Refund confirmation.
+
+Channels:
+
+- In-app notifications.
+- Push notifications.
+- Email.
+- SMS where configured.
+
+Support Arabic and English notification content initially, with the ability to extend other languages.
+
+Prevent duplicate notifications through idempotent event processing.
+
+---
+
+# 13. ADMINISTRATOR CONTROL PANEL
+
+Create a secure administrative dashboard.
+
+### A. User management
+
+- View riders.
+- View drivers.
+- Search users.
+- Activate/deactivate accounts.
+- Suspend accounts.
+- Review driver documents.
+- Approve/reject drivers.
+- Review complaints.
+- Manage roles and permissions.
+
+### B. Ride management
+
+- View all rides.
+- Monitor live rides.
+- View assigned drivers.
+- Track ride statuses.
+- View cancellations.
+- Review dispatch failures.
+- Investigate disputed rides.
+
+### C. Pricing management
+
+Allow administrators to configure:
+
+- Countries.
+- Cities.
+- Currencies.
+- Vehicle categories.
+- Base fares.
+- Distance charges.
+- Waiting charges.
+- Minimum fares.
+- Taxes.
+- Surcharges.
+- Surge pricing.
+- Effective dates.
+
+All pricing changes must generate an audit record containing the administrator, previous value, new value, and timestamp.
+
+### D. Driver management
+
+- Driver approval.
+- Vehicle verification.
+- Document expiry monitoring.
+- Driver availability.
+- Driver performance.
+- Trip history.
+- Earnings.
+- Payout records.
+
+### E. Financial management
+
+- Total ride revenue.
+- Platform commission.
+- Driver earnings.
+- Payment success/failure.
+- Refunds.
+- Outstanding payouts.
+- Currency-based reports.
+- Daily, weekly, and monthly summaries.
+
+### F. Operational configuration
+
+Administrators must be able to configure:
+
+- Dispatch radius.
+- Offer duration.
+- Dispatch escalation.
+- Vehicle categories.
+- Cancellation policies.
+- Service availability.
+- Notification templates.
+- Country and city settings.
+
+---
+
+# 14. MULTILINGUAL INTERFACE
+
+Maintain and improve the existing multilingual capabilities.
+
+Supported languages:
+
+- Arabic.
+- English.
+- German.
+- French.
+- Spanish.
+- Italian.
+- Russian.
+
+Requirements:
+
+- Arabic as the default language.
+- Full right-to-left layout for Arabic.
+- Correct left-to-right layout for other languages.
+- Translated labels and validation messages.
+- Localized dates and numbers.
+- Local currency formatting.
+- Translated notifications.
+- Language selection in user profile.
+
+Do not hardcode visible text inside business logic.
+
+---
+
+# 15. USER INTERFACE AND EXPERIENCE
+
+Maintain a professional, modern ride-hailing interface.
+
+### Rider interface
+
+- Registration/login.
+- Map home screen.
+- Pickup and destination selection.
+- Vehicle selection.
+- Fare estimate.
+- Ride confirmation.
+- Driver search screen.
+- Driver information.
+- Live tracking.
+- Trip history.
+- Payment.
+- Ratings.
+- Profile and settings.
+
+### Driver interface
+
+- Registration/login.
+- Driver onboarding.
+- Document submission.
+- Approval status.
+- Online/offline toggle.
+- Ride request alert.
+- 30-second countdown.
+- Accept/reject controls.
+- Pickup navigation.
+- Arrived/Start/Complete controls.
+- Trip history.
+- Earnings dashboard.
+- Profile and vehicle settings.
+
+### Responsive design
+
+- Mobile-first design.
+- Responsive tablet and desktop layouts.
+- Bottom navigation on mobile.
+- Sidebar navigation on larger screens.
+- Readable typography.
+- Accessible buttons.
+- Clear ride-status indicators.
+- Fast-loading screens.
+- Consistent Arabic RTL behaviour.
+
+---
+
+# 16. DATABASE AND DATA SECURITY
+
+Inspect the existing database and update its schema without destroying existing records.
+
+Create or adapt the following logical entities:
+
+- USERS.
+- USER_ROLES.
+- RIDER_PROFILES.
+- DRIVER_PROFILES.
+- DRIVER_DOCUMENTS.
+- VEHICLES.
+- DRIVER_AVAILABILITY.
+- DRIVER_LOCATIONS.
+- RIDES.
+- RIDE_OFFERS.
+- RIDE_STATUS_HISTORY.
+- PRICING_POLICIES.
+- COUNTRIES.
+- CITIES.
+- FARE_QUOTES.
+- PAYMENTS.
+- PAYMENT_TRANSACTIONS.
+- DRIVER_EARNINGS.
+- DRIVER_PAYOUTS.
+- NOTIFICATIONS.
+- RATINGS.
+- AUDIT_LOGS.
+
+Apply appropriate relationships, indexes, constraints, and data validation.
+
+### Critical security requirements
+
+- Enforce authorization on every sensitive API and database operation.
+- Apply row-level security where supported.
+- Prevent riders from reading other riders' private ride records.
+- Prevent drivers from accessing unrelated customer information.
+- Restrict driver document access to authorized personnel.
+- Protect payment information.
+- Validate all incoming data on the server.
+- Use secure authentication and session handling.
+- Apply rate limiting to sensitive endpoints.
+- Maintain audit logs for administrative operations.
+- Protect API keys and secrets using environment variables or secure secret storage.
+
+**Critical rule:** A signed-in user must never gain access to another user's ride, pickup coordinates, personal information, payment information, or private documents simply because they are authenticated.
+
+---
+
+# 17. PERFORMANCE AND RELIABILITY
+
+Optimize the application for growth.
+
+Initial performance objectives:
+
+- Support an initial target of 5,000 concurrent users where the hosting environment permits.
+- Design for future growth toward 50,000+ users.
+- Keep dispatch response times low.
+- Avoid unnecessary database queries.
+- Paginate large datasets.
+- Use caching where supported.
+- Process non-critical tasks asynchronously where supported.
+- Implement retry policies for temporary service failures.
+- Prevent duplicate processing of critical events.
+
+Do not claim that these capacity targets have been achieved without load-test evidence.
+
+If current hosting limits prevent these targets, document the actual constraints and propose a compatible scaling path.
+
+---
+
+# 18. ERROR HANDLING AND AUDITABILITY
+
+Every critical operation must produce clear, traceable results.
+
+Implement:
+
+- Centralized error handling.
+- Structured application logs.
+- API error responses.
+- Payment transaction logs.
+- Dispatch event logs.
+- Ride status history.
+- Driver assignment history.
+- Administrative audit logs.
+- Integration failure monitoring.
+
+Critical operations must be idempotent wherever duplicate requests or event delivery could cause financial or operational errors.
+
+Use reliable event delivery patterns where the existing infrastructure supports them.
+
+---
+
+# 19. TESTING AND QUALITY ASSURANCE
+
+Before declaring the project complete, run automated and manual tests.
+
+### A. Registration tests
+
+- Register a new Rider.
+- Register a new Driver.
+- Verify phone/email.
+- Submit driver documents.
+- Approve and reject drivers.
+- Switch from Rider to Driver.
+- Switch from Driver to Rider.
+- Prevent switching during active trips.
+- Prevent unapproved drivers from going online.
+
+### B. Dispatch tests
+
+- Request a ride.
+- Identify nearby eligible drivers.
+- Deliver driver alerts.
+- Verify the distinctive notification sound where supported.
+- Display the 30-second countdown.
+- Accept within 30 seconds.
+- Reject an offer.
+- Attempt acceptance after expiration.
+- Test two drivers accepting simultaneously.
+- Verify exactly one driver wins.
+- Test driver disconnection.
+- Test automatic radius expansion.
+- Test no-driver-available behaviour.
+
+### C. Concurrency tests
+
+Simulate at least 100 drivers attempting to accept the same ride.
+
+Expected result:
+
+- Exactly one successful assignment.
+- No duplicate ride assignments.
+- No conflicting driver assignments.
+- All losing offers invalidated.
+
+Also test:
+
+- Duplicate ride requests.
+- Repeated acceptance requests.
+- Simultaneous driver status changes.
+- Out-of-order GPS updates.
+- Duplicate payment webhooks.
+
+### D. Pricing tests
+
+Test:
+
+- Cairo pricing.
+- Different Egyptian cities.
+- Different countries.
+- Different currencies.
+- Different vehicle categories.
+- Minimum fare.
+- Waiting charges.
+- Discounts.
+- Taxes.
+- Surcharges.
+- Surge multipliers.
+- Pricing updates.
+- Accepted rides retaining their pricing version.
+- Currency precision.
+
+### E. Payment tests
+
+Use Stripe test mode.
+
+Test:
+
+- Successful payment.
+- Declined payment.
+- Authentication-required payment.
+- Duplicate payment requests.
+- Duplicate webhooks.
+- Refunds.
+- Partial refunds.
+- Payment reconciliation.
+- Currency compatibility.
+- Driver earnings calculation.
+
+### F. Security tests
+
+Verify:
+
+- Riders cannot read other riders' rides.
+- Drivers cannot access unrelated customer records.
+- Unapproved drivers cannot receive offers.
+- Suspended drivers cannot go online.
+- Unauthorized users cannot modify fares.
+- Unauthorized users cannot modify ride status.
+- Sensitive documents are protected.
+- Payment operations cannot be manipulated through frontend requests.
+
+### G. Performance tests
+
+Measure:
+
+- Concurrent users.
+- API response times.
+- Dispatch latency.
+- Database response times.
+- GPS update handling.
+- Error rates.
+- Resource consumption.
+
+Report p50, p95, and p99 latency where measurable.
+
+---
+
+# 20. IMPLEMENTATION STRATEGY
+
+Work in controlled phases.
+
+### Phase 1 – Existing Application Audit
+
+Inspect:
+
+- Existing source code.
+- Current database schema.
+- Authentication.
+- User roles.
+- APIs.
+- Maps integration.
+- Location tracking.
+- Ride lifecycle.
+- Payment functionality.
+- Hosting limitations.
+- Existing security policies.
+
+Deliver a gap analysis before changing the application.
+
+### Phase 2 – Registration and Roles
+
+Implement dual Rider/Driver registration, driver onboarding, approval workflow, and account switching.
+
+### Phase 3 – Driver Location and Dispatch
+
+Implement live driver availability, nearby driver matching, notifications, 30-second acceptance, atomic assignment, and dispatch escalation.
+
+### Phase 4 – International Pricing
+
+Implement country/city detection, local currency selection, configurable pricing policies, fare calculation, and fare history.
+
+### Phase 5 – Payments
+
+Integrate Stripe, payment verification, refunds, receipts, driver earnings, and payout records.
+
+### Phase 6 – Administration
+
+Implement operational, financial, pricing, driver, and user management.
+
+### Phase 7 – Security and Testing
+
+Complete authorization, data protection, automated tests, concurrency tests, payment tests, and performance testing.
+
+### Phase 8 – Production Readiness
+
+Verify configuration, environment variables, integrations, monitoring, backups, error handling, and deployment readiness.
+
+---
+
+# 21. DEVELOPMENT RULES
+
+Follow these mandatory instructions throughout implementation:
+
+1. Do not rebuild the existing application from scratch.
+2. Do not remove working functionality.
+3. Do not replace the current framework without a documented technical reason.
+4. Inspect existing code before modifying it.
+5. Preserve existing user accounts and historical records.
+6. Use database migrations for schema changes.
+7. Keep secrets outside frontend code.
+8. Never trust frontend calculations for financial or security-critical operations.
+9. Enforce role permissions on the backend.
+10. Use server-controlled timestamps for dispatch deadlines.
+11. Make ride assignment atomic.
+12. Prevent duplicate payments and duplicate ride assignments.
+13. Maintain pricing history and accepted fare snapshots.
+14. Use the actual hosting platform's supported capabilities.
+15. Do not simulate successful integrations that are not connected.
+16. Do not mark incomplete features as production-ready.
+17. Build reusable components and maintain clean code.
+18. Test each phase before proceeding to the next.
+19. Maintain backward compatibility wherever possible.
+20. Document any infrastructure limitation or required external configuration.
+
+---
+
+# 22. FINAL DELIVERABLES
+
+At completion, provide:
+
+1. Updated VeloRide application.
+2. Updated database schema and migrations.
+3. Complete Rider registration and account management.
+4. Complete Driver registration and approval workflow.
+5. Rider/Driver account switching.
+6. Real-time driver availability and location tracking.
+7. Nearby driver dispatch.
+8. Special driver alert and 30-second acceptance process.
+9. Atomic driver assignment.
+10. Automatic dispatch escalation.
+11. International country/city pricing engine.
+12. Automatic local currency selection.
+13. Stripe payment integration.
+14. Driver earnings and payout ledger.
+15. Administrative dashboard.
+16. Multilingual responsive interface.
+17. Security and authorization implementation.
+18. Automated test results.
+19. Deployment and configuration instructions.
+20. Known limitations and remaining production blockers.
+
+### Final QA report
+
+Provide a clear status for every major feature:
+
+| Feature | Status | Evidence | Remaining Issues |
+|---|---|---|---|
+| Rider registration | PASS/FAIL/BLOCKED | Test evidence | Details |
+| Driver registration | PASS/FAIL/BLOCKED | Test evidence | Details |
+| Role switching | PASS/FAIL/BLOCKED | Test evidence | Details |
+| GPS tracking | PASS/FAIL/BLOCKED | Test evidence | Details |
+| Driver dispatch | PASS/FAIL/BLOCKED | Test evidence | Details |
+| 30-second acceptance | PASS/FAIL/BLOCKED | Test evidence | Details |
+| Atomic assignment | PASS/FAIL/BLOCKED | Test evidence | Details |
+| Dynamic pricing | PASS/FAIL/BLOCKED | Test evidence | Details |
+| Currency selection | PASS/FAIL/BLOCKED | Test evidence | Details |
+| Stripe payments | PASS/FAIL/BLOCKED | Test evidence | Details |
+| Driver earnings | PASS/FAIL/BLOCKED | Test evidence | Details |
+| Data security | PASS/FAIL/BLOCKED | Test evidence | Details |
+| Performance | PASS/FAIL/BLOCKED | Test evidence | Details |
+
+Use these definitions:
+
+- **PASS:** Implemented and successfully tested.
+- **FAIL:** Tested and failed.
+- **BLOCKED:** Cannot be completed because of an external dependency or platform limitation.
+- **MISSING:** Not implemented.
+
+Do not report PASS without actual test evidence.
+
+---
+
+# FINAL EXECUTION INSTRUCTION
+
+Start by auditing the existing VeloRide application and identifying its current architecture, technology stack, database structure, and available integrations.
+
+Then produce a concise implementation plan showing:
+
+- Existing features to preserve.
+- Features requiring modification.
+- New features to implement.
+- Database changes.
+- Required integrations.
+- Platform limitations.
+- Implementation sequence.
+
+After the audit, begin coding immediately.
+
+Implement the application incrementally, test each module, resolve errors, and preserve existing functionality.
+
+**The final objective is a working, secure, commercially deployable ride-hailing platform — not merely a visual prototype or a collection of disconnected screens.**

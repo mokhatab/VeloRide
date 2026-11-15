@@ -1,0 +1,6 @@
+{
+  "name": "VeloRide",
+  "description": "Multilingual ride-hailing platform with dual Rider and Driver roles, real-time GPS tracking, 30-second atomic driver dispatch, dynamic country/city fare calculation, Stripe payments, and admin controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
